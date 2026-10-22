@@ -6,6 +6,7 @@
 #include "azjump.h"
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 diskOS contributors */
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -69,6 +70,60 @@ static int         g_touch_raw = -1;   /* a 2nd, RAW read-only fd on the touch e
  * g_manual_sleep is armed by ui_request_sleep(); the saver block below honours it and clears
  * it once the panel is woken (touch takes us off SCR_SAVER). */
 static volatile int g_manual_sleep = 0;
+static uint32_t g_zplug;             /* Zune: a charger was just connected (tick | 1) */
+/* Zune: the power key shows the lock screen for a moment before the panel goes dark, and every wake lands on it */
+static uint32_t g_zprev_at;          /* lock-screen preview after a power-key blank (tick | 1, 0 = none) */
+static int g_zprev_cancel;           /* a 2nd power press during the preview: the player turned the screen back on */
+static uint32_t g_zunlock_at;       /* the lock screen was just tapped away: LVGL stays deaf a moment */
+static int g_zlift_seen = 1;         /* after a wake onto the lock screen: the waking finger has lifted */
+/* power-key trace for the lock-screen preview: /tmp/sdcard/.diskos/pwr.log (capped), so a device run can be read back */
+static void zpwr_log(const char *fmt, ...);
+/* what the panel side looks like around a power press (to find how the player switches the glass off) */
+static void zpwr_dump(const char *tag){
+    static const char *const P[] = { "/sys/class/graphics/fb0/blank", "/sys/class/graphics/fb0/state", "/sys/class/graphics/fb0/pan",
+        "/sys/class/backlight/backlight/actual_brightness", "/sys/class/backlight/backlight/brightness", "/sys/class/backlight/backlight/bl_power" };
+    char line[512]; size_t n = 0; line[0] = 0;
+    for(size_t i = 0; i < sizeof P / sizeof P[0]; i++){
+        char v[48] = "-"; FILE *f = fopen(P[i], "r");
+        if(f){ if(!fgets(v, sizeof v, f)) snprintf(v, sizeof v, "?"); fclose(f); v[strcspn(v, "\n")] = 0; }
+        n += (size_t)snprintf(line + n, n < sizeof line ? sizeof line - n : 0, " %s=%s", strrchr(P[i], '/') + 1, v);
+    }
+    DIR *d = opendir("/sys/class/lcd");
+    if(d){ struct dirent *e; while((e = readdir(d))){ if(e->d_name[0] == '.') continue;
+        char pth[160], v[32] = "-"; snprintf(pth, sizeof pth, "/sys/class/lcd/%s/lcd_power", e->d_name);
+        FILE *f = fopen(pth, "r"); if(f){ if(!fgets(v, sizeof v, f)) v[0] = 0; fclose(f); v[strcspn(v, "\n")] = 0; }
+        n += (size_t)snprintf(line + n, n < sizeof line ? sizeof line - n : 0, " lcd:%s=%s", e->d_name, v); } closedir(d); }
+    else n += (size_t)snprintf(line + n, n < sizeof line ? sizeof line - n : 0, " (no /sys/class/lcd)");
+    zpwr_log("%s%s", tag, line);
+}
+/* stall watch: a tiny thread notes in pwr.log when the main loop stops turning for 6 s or more (and when it turns
+ * again), so an "unresponsive" report can be told apart: a stuck loop, or a loop that runs but a dark panel */
+static volatile unsigned g_loop_beat; static volatile int g_beat_scr = -1, g_beat_bl = -1;
+static void *stall_watch(void *a){
+    (void)a; unsigned last = 0; int idle = 0;
+    for(;;){
+        sleep(2);
+        unsigned b = g_loop_beat;
+        if(b == last){
+            if(++idle == 3){ FILE *f = fopen("/tmp/sdcard/.diskos/pwr.log", "a");
+                             if(f){ fprintf(f, "STALL main loop stopped (scr=%d bl=%d)\n", g_beat_scr, g_beat_bl); fclose(f); } }
+        } else {
+            if(idle >= 3){ FILE *f = fopen("/tmp/sdcard/.diskos/pwr.log", "a");
+                           if(f){ fprintf(f, "STALL over after ~%d s\n", idle * 2); fclose(f); } }
+            idle = 0;
+        }
+        last = b;
+    }
+    return NULL;
+}
+static void zpwr_dump_cb(lv_timer_t *t){ zpwr_dump((const char *)lv_timer_get_user_data(t)); }
+static void zpwr_log(const char *fmt, ...){
+    static int lines, on = -1; if(on < 0) on = cfg_get_int("zpwr_trace", 0);   /* off unless asked for (cfg zpwr_trace=1): a few lines per wake to .diskos/pwr.log, capped */
+    if(!on || lines > 2000) return;
+    FILE *f = fopen("/tmp/sdcard/.diskos/pwr.log", "a"); if(!f) return;
+    va_list ap; va_start(ap, fmt); fprintf(f, "%u ", (unsigned)lv_tick_get()); vfprintf(f, fmt, ap); va_end(ap);
+    fputc('\n', f); fclose(f); lines++;
+}
 static uint32_t g_manual_sleep_at = 0;
 void ui_request_sleep(void){ g_manual_sleep = 1; g_manual_sleep_at = lv_tick_get(); }
 static lv_obj_t   *g_dbgdot = NULL;
@@ -210,6 +265,14 @@ static void status_poll_cb(lv_timer_t *t){
     bt = bt_radio_on();
 
     usage_note_battery(batt,charging);
+    modes_usb_poll();   /* Figma 82: a USB-C DAC plugged / unplugged */
+    modes_boot_check(); /* a USB-C route left over from before the restart: back to the jack */
+    {   /* Zune (Figma 09): plugging in from home or the lock screen opens the charging screen */
+        static int prev_chg = -1;
+        int on = charging || usage_plugged_in() == 1;     /* on the charger, charging or held at the Charging Limit */
+        if(th_zune() && prev_chg == 0 && on) g_zplug = lv_tick_get() | 1;   /* the main loop shows it (it owns the panel) */
+        prev_chg = on;
+    }
     home_set_status(batt, charging, wifi, bt);
     quicksettings_set_battery(batt,charging);
 }
@@ -980,6 +1043,7 @@ void ui_rescan_library(void){
     if(!ui_local_playback_allowed()){ ui_toast("Return to local playback to scan"); return; }
     if(!sd_io_allowed()){ ui_toast("SD card is not ready"); return; }
     if(scanner_start() != 0){ ui_toast("Couldn't start library scan"); return; }
+    if(th_zune()){ void zune_scan_show(void); zune_scan_show(); return; }
     ui_toast("Scanning library...");
 }
 /* Poll for scan completion: reload the library from the rebuilt DB, refresh the view, toast. */
@@ -3345,6 +3409,7 @@ int main(int argc, char **argv){
     uint32_t last_activity = lv_tick_get();
     int woke = 0;   /* a press that only wakes the saver is swallowed */
     int bl_state = 0;   /* 0 = normal, 1 = saver-dim, 2 = off */
+    { pthread_t sw; if(pthread_create(&sw, NULL, stall_watch, NULL) == 0) pthread_detach(sw); }
     int touch_gate_on = 0;          /* LVGL touch switched off while the screen is dark */
     uint32_t touch_gate_wake = 0;   /* a waking touch still down: keep it off until the lift (tick | 1, 0 = none) */
     uint32_t last_blpoll = 0;   /* PW-10 backlight-rail poll cadence */
@@ -3691,7 +3756,15 @@ int main(int argc, char **argv){
                         /* On Now Playing a nav swipe must be a LONG, STRAIGHT,
                          * horizontal slide (so it's not confused with a seek drag
                          * along the ring): right = hub, left = back. */
-                        if(adx >= NP_NAV_DIST && adx > ady*NP_NAV_STRAIGHT && dt<900){
+                        if(th_zune() && BACK_EDGE(sx) && horiz && SIDE_DX(dx)>0 && adx>=g_swipe_thresh && dt<700){
+                            screen_back();   /* fork (Zune): the usual edge swipe works here too; the rim seek only
+                                              * takes drags ALONG the rim, so an edge swipe inward never reaches it */
+                        } else if(th_zune() && adx >= 80 && adx > ady*2 && dt<900){
+                            /* fork (Zune): right to left = the actions menu (as on every theme), left to right (not
+                             * from the edge) = the spinning record; back is the edge swipe above */
+                            if(SIDE_DX(dx) < 0) screen_show(SCR_NPHUB);
+                            else                ui_np_fsart_open();
+                        } else if(adx >= NP_NAV_DIST && adx > ady*NP_NAV_STRAIGHT && dt<900){
                             if(dx < 0) screen_show(SCR_NPHUB);
                             else       screen_back();
                         }
@@ -3705,7 +3778,7 @@ int main(int argc, char **argv){
                         if(BACK_EDGE(sx) && horiz && SIDE_DX(dx)>0 && adx>=g_swipe_thresh && dt<700){
                             albumwall_drag_cancel();            /* left-edge right-swipe = back (drag wasn't armed here) */
                             screen_back();
-                        } else if(adx<18 && ady<18 && sx>=100 && sx<=260 && sy>=76 && sy<=214 && dt<900){
+                        } else if(adx<18 && ady<18 && sx>=100 && sx<=260 && sy>=(th_zune()?100:76) && sy<=(th_zune()?252:214) && dt<900){
                             albumwall_drag_cancel();            /* a still touch on the centre cover = tap */
                             if(dt >= 500) albumwall_play();     /* long-press the cover = play the whole album */
                             else          albumwall_open();     /* tap the cover = open the album's track list */
@@ -3780,18 +3853,71 @@ int main(int argc, char **argv){
          * brightness==0 && bl_power==0 is unambiguously a player-side blank. Catch it on a slow poll,
          * fully power the rail down (bl_power=4) and sync bl_state=2 so only a touch wakes. When the
          * player raises brightness again (a second power press), bring the panel back to match. */
-        if(lv_tick_elaps(last_blpoll) >= 250){
+        static uint32_t zprev_poll; static int zprev_woke;
+        if(!g_zprev_at) zprev_woke = 0;
+        if(g_zprev_at && lv_tick_elaps(zprev_poll) >= 20){   /* Zune lock-screen preview: hold the panel lit */
+            zprev_poll = lv_tick_get();
+            int cbr = read_int_file("/sys/class/backlight/backlight/brightness");
+            int cbp = read_int_file("/sys/class/backlight/backlight/bl_power");
+            int lvl = ui_effective_brightness(); if(lvl < 1) lvl = 1;
+            if(g_zprev_cancel){                          /* pressed again: the player has the screen on */
+                zpwr_log("cancel br=%d bp=%d", cbr, cbp);
+                g_zprev_at = 0; g_zprev_cancel = 0; bl_state = 0; player_blanked = 0;
+                ui_backlight(lvl);
+                last_activity = lv_tick_get(); g_manual_sleep = 1; g_manual_sleep_at = lv_tick_get(); g_zlift_seen = 1;
+            } else if(lv_tick_elaps(g_zprev_at) > 1800){
+                zpwr_log("end br=%d bp=%d scr=%d", cbr, cbp, screen_current());
+                FILE *bf = fopen("/sys/class/backlight/backlight/brightness", "w");   /* hand the player back its blank */
+                if(bf){ fputs("0", bf); fclose(bf); }
+                ui_backlight(0); bl_state = 2; player_blanked = 1; g_zprev_at = 0;
+                last_blpoll = lv_tick_get();
+            } else if(cbr != lvl || cbp != 0){                /* the player blanked (again): light it back up */
+                ui_backlight(0); usleep(30000); ui_backlight(lvl);   /* a full rail off -> on: the panel came back that way on a touch wake */
+                int was = fbpan_wake();                      /* ...and the panel itself (it went grey, not black) */
+                zpwr_log("relight br=%d bp=%d -> %d, pan was %d", cbr, cbp, lvl, was);
+                zprev_woke = 1;
+            } else if(!zprev_woke && lv_tick_elaps(g_zprev_at) > 450){
+                ui_backlight(0); usleep(30000); ui_backlight(lvl);
+                int was = fbpan_wake(); zprev_woke = 1;
+                zpwr_log("late wake, pan was %d", was); zpwr_dump("dump@late");
+            }
+        }
+        if(!g_zprev_at && lv_tick_elaps(last_blpoll) >= 250){
             last_blpoll = lv_tick_get();
             int cbr = read_int_file("/sys/class/backlight/backlight/brightness");
             int cbp = read_int_file("/sys/class/backlight/backlight/bl_power");
-            if(cbr == 0 && cbp == 0){
+            if(cbr == 0 && cbp == 0 && th_zune() && bl_state == 0 && simple_cfg_get_int("zlock_preview", 0)){
+                /* Zune: show the lock screen for a moment, then dark (the player still thinks it's off) */
+                zpwr_log("blank seen by poll br=%d bp=%d scr=%d", cbr, cbp, screen_current());
+                if(screen_current() != SCR_SAVER) screen_show(SCR_SAVER);
+                lv_refr_now(NULL);
+                ui_backlight(ui_effective_brightness()); bl_state = 1;
+                g_zprev_at = lv_tick_get() | 1; g_zprev_cancel = 0;
+            } else if(cbr == 0 && cbp != 0 && bl_state == 2 && !player_blanked){
+                /* the player blanked while diskOS already had the panel dark (idle): remember it, so the player's own
+                 * un-blank (the next power press) lights the panel again instead of being ignored */
+                player_blanked = 1; zpwr_log("player blank while dark");
+            } else if(bl_state != 2 && cbp != 0 && cbr > 0){
+                /* self-heal: diskOS thinks the panel is lit but the rail is off - light it again */
+                zpwr_log("heal: rail off while lit bl=%d br=%d bp=%d scr=%d", bl_state, cbr, cbp, screen_current());
+                ui_backlight(bl_state == 1 ? (ui_effective_brightness() > 6 ? 6 : ui_effective_brightness()) : ui_effective_brightness());
+                fbpan_wake();
+            } else if(cbr == 0 && cbp == 0){
                 /* player blanked via brightness-only -> cut the rail. Won't re-fire (bl_power now 4). */
                 ui_backlight(0); bl_state = 2; player_blanked = 1;
+                if(th_zune() && screen_current() != SCR_SAVER){      /* Zune: locked - the lock screen waits behind the dark glass */
+                    screen_show(SCR_SAVER); zpwr_log("locked: lock screen behind the dark panel");
+                }
             } else if(player_blanked && cbr > 0){
                 /* player un-blanked (2nd power press restored brightness) -> restore the panel. */
                 /* The player restores ITS OWN remembered level, not the one set in Quick Settings / Display, so the
                  * brightness looked reset after every off > on cycle (fork fix): put the diskOS brightness back. */
+                if(th_zune()){                               /* Zune: every wake lands on the lock screen */
+                    if(screen_current() != SCR_SAVER) screen_show(SCR_SAVER);
+                    g_manual_sleep = 1; g_manual_sleep_at = lv_tick_get(); g_zlift_seen = 1;
+                }
                 ui_backlight(ui_effective_brightness());
+                { int was = fbpan_wake(); zpwr_log("player un-blank: lit (pan was %d)", was); }
                 bl_state = 0; last_activity = lv_tick_get(); player_blanked = 0;
             }
         }
@@ -3812,8 +3938,22 @@ int main(int argc, char **argv){
                 }
                 int d = gpe ? (((*gpe >> 31) & 1u) == 0) : 0;
                 if(!d) pk_seen_up = 1;
-                if(d && !pk_down && pk_seen_up){ pk_down = 1; pk_since = lv_tick_get(); }
-                else if(!d && pk_down){ pk_down = 0; pk_rel = lv_tick_get(); }
+                if(d && !pk_down && pk_seen_up){ pk_down = 1; pk_since = lv_tick_get();
+                    zpwr_log("key down bl=%d prev=%u scr=%d", bl_state, (unsigned)g_zprev_at, screen_current());
+                    if(g_zprev_at && lv_tick_elaps(g_zprev_at) > 150) g_zprev_cancel = 1;
+                    else if(th_zune() && bl_state == 0 && !g_zprev_at && power_shutdown_phase() == PW_OFF){
+                        /* screen going off: put the lock screen up now, so whatever wakes it lands there. The lit
+                         * preview (cfg zlock_preview) stays off: the player's off switches the glass to an empty grey
+                         * that diskOS can't undo yet. */
+                        zpwr_dump("dump@down");
+                        lv_timer_t *dt = lv_timer_create(zpwr_dump_cb, 400, (void *)"dump@400"); lv_timer_set_repeat_count(dt, 1);
+                        dt = lv_timer_create(zpwr_dump_cb, 1500, (void *)"dump@1500"); lv_timer_set_repeat_count(dt, 1);
+                        if(simple_cfg_get_int("zlock_preview", 0)){
+                            if(screen_current() != SCR_SAVER) screen_show(SCR_SAVER);
+                            lv_refr_now(NULL); bl_state = 1; g_zprev_at = lv_tick_get() | 1; g_zprev_cancel = 0; }
+                    }
+                }
+                else if(!d && pk_down){ pk_down = 0; pk_rel = lv_tick_get(); zpwr_log("key up"); }
                 int hold = simple_cfg_get_int("pwr_hold_ms", 5000); if(hold < 300) hold = 300;
                 if(pk_down && !pk_shown && lv_tick_elaps(pk_since) >= (uint32_t)hold){
                     pk_shown = 1;
@@ -3839,17 +3979,34 @@ int main(int argc, char **argv){
          * a dark panel needed many taps to wake). Drained every loop (even awake) so it never backs
          * up; only acts when the panel is dimmed/off (bl_state != 0). */
         if(g_touch_raw >= 0){
-            struct input_event ev[32]; ssize_t n; int any = 0, lifted = 0;
+            struct input_event ev[32]; ssize_t n; int any = 0, lifted = 0, pressed = 0;
             while((n = read(g_touch_raw, ev, sizeof ev)) > 0){                /* evdev hands out whole events */
                 any = 1;
                 for(int k = 0; k < (int)(n / (ssize_t)sizeof ev[0]); k++){
-                    if(ev[k].type == EV_KEY && ev[k].code == BTN_TOUCH) lifted = ev[k].value == 0;
-                    else if(ev[k].type == EV_ABS && ev[k].code == ABS_MT_TRACKING_ID) lifted = ev[k].value < 0;
+                    if(ev[k].type == EV_KEY && ev[k].code == BTN_TOUCH){ lifted = ev[k].value == 0; if(ev[k].value) pressed = 1; }
+                    else if(ev[k].type == EV_ABS && ev[k].code == ABS_MT_TRACKING_ID){ lifted = ev[k].value < 0; if(ev[k].value >= 0) pressed = 1; }
                 }
             }
-            if(any && bl_state){
+            if(any && lifted) g_zlift_seen = 1;
+            if(th_zune() && any && bl_state && (g_zprev_at || (bl_state == 1 && !(pressed && g_zlift_seen)))){
+                /* Zune: the power-key preview ignores touch; on a lit lock screen only a fresh tap (after the
+                 * waking finger lifted) unlocks */
+                zpwr_log("touch ignored bl=%d prev=%u pressed=%d liftseen=%d scr=%d", bl_state, (unsigned)g_zprev_at, pressed, g_zlift_seen, screen_current());
+            } else if(th_zune() && any && bl_state == 2){
+                zpwr_log("touch wake from dark scr=%d lifted=%d gate=%d", screen_current(), lifted, touch_gate_on);
+                last_activity = lv_tick_get();               /* dark -> light up ON the lock screen, never straight in */
+                if(screen_current() != SCR_SAVER) screen_show(SCR_SAVER);
+                ui_backlight(ui_effective_brightness()); bl_state = 0; player_blanked = 0;
+                { int was = fbpan_wake(); zpwr_log("touch wake: panel re-armed (pan was %d)", was); }   /* the player's blank can leave the panel itself off */
+                g_manual_sleep = 1; g_manual_sleep_at = lv_tick_get(); g_zlift_seen = lifted;
+                if(touch_gate_on) touch_gate_wake = lifted ? 0 : lv_tick_get() | 1;
+            } else if(any && bl_state){
+                if(th_zune()){ zpwr_log("touch unlock bl=%d scr=%d lifted=%d gate=%d", bl_state, screen_current(), lifted, touch_gate_on);
+                               if(screen_current() == SCR_SAVER) g_zunlock_at = lv_tick_get() | 1; }
                 last_activity = lv_tick_get();
+                int was_dark = bl_state == 2;
                 ui_backlight(ui_effective_brightness()); bl_state = 0;
+                if(was_dark) fbpan_wake();                   /* the panel too, not only the backlight */
                 player_blanked = 0;   /* touch woke it; don't let the PW-10 poll re-restore */
                 if(screen_current() == SCR_SAVER) screen_back();
                 if(touch_gate_on) touch_gate_wake = lifted ? 0 : lv_tick_get() | 1;   /* the waking touch never acts: wait for the lift */
@@ -3857,6 +4014,25 @@ int main(int argc, char **argv){
             } else if(touch_gate_wake && lifted) touch_gate_wake = 0;
         }
         if(kbinput_active()) last_activity = lv_tick_get();
+        {   /* Zune (Figma 09): plugging in lights the glass on the charging screen; left alone it goes dark again */
+            static uint32_t shown; static int lit_by_us;
+            if(g_zplug){
+                g_zplug = 0;
+                if(!kbinput_active() && power_shutdown_phase() == PW_OFF){
+                    if(screen_current() != SCR_USAGE) screen_show(SCR_USAGE);
+                    if(bl_state){ ui_backlight(ui_effective_brightness()); bl_state = 0; lit_by_us = 1; }
+                    else lit_by_us = 0;
+                    last_activity = lv_tick_get(); shown = lv_tick_get() | 1;
+                    zpwr_log("charger in: charging screen (lit_by_us=%d)", lit_by_us);
+                }
+            }
+            if(shown && lv_tick_elaps(shown) > 6000){
+                if(lit_by_us && screen_current() == SCR_USAGE && lv_display_get_inactive_time(NULL) >= 5500){
+                    screen_back(); ui_backlight(0); bl_state = 2;        /* back to how it was: dark, on the lock screen */
+                }
+                shown = 0; lit_by_us = 0;
+            }
+        }
         {   /* Idle power-off (issue #17): only "idle" when playing music locally and nothing is playing. A working mode
              * other than Playback (USB DAC, Bluetooth DAC, BT streaming, AirPlay, USB storage) is the Disc in use
              * without a song of its own moving, and a Disc on external power (plugged in, or charging) is on purpose:
@@ -3865,6 +4041,11 @@ int main(int argc, char **argv){
             power_tick(last_activity, busy);
         }   /* Sendspin: AirPlay playback the player may not report */   /* AFTER all input is consumed (a pending touch must win the race): SD-safe shutdown, diskOS idle power-off, temperature notice */
         int in_saver = (screen_current()==SCR_SAVER);
+        /* Zune: the lock screen takes no touch of its own (the raw path unlocks it only while dimmed), so a lit lock
+         * screen with no countdown armed could never be left: always arm the 10 s one there */
+        if(th_zune() && in_saver && bl_state == 0 && !g_manual_sleep && !g_zprev_at){
+            g_manual_sleep = 1; g_manual_sleep_at = lv_tick_get(); zpwr_log("lit lock screen: countdown armed");
+        }
         /* a manual Sleep request ends the moment the panel is woken (we leave SCR_SAVER) */
         if(g_manual_sleep && !in_saver) g_manual_sleep = 0;
         int manual = g_manual_sleep;
@@ -3873,7 +4054,7 @@ int main(int argc, char **argv){
          * they shouldn't). Time/info savers (analog=1, minim=2, weather=3) stay useful idle.
          * A suppressed art saver still power-saves the backlight below. */
         int sstyle    = simple_cfg_get_int("saver_style", 0);
-        int art_saver = (sstyle == 0 || sstyle == 4);
+        int art_saver = !th_zune() && (sstyle == 0 || sstyle == 4);   /* Zune's lock screen has an idle clock too */
         int saver_ok  = (!art_saver || playing);
         if(saver_timeout > 0 || manual){
             /* manual sleep runs its dim/off countdown from the tile tap, independent of the
@@ -3898,20 +4079,23 @@ int main(int argc, char **argv){
                 int dim = ui_effective_brightness();
                 if(dim > 6 && !(in_saver && saver_wants_bright())) dim = 6;
                 ui_backlight(dim); bl_state = 1;
+                zpwr_log("dim scr=%d manual=%d", screen_current(), manual);
             }
             /* full off after the screen-off delay. Manual sleep uses the configured Screen Off
              * delay when set, else a 10s default so the tile actually powers the panel down. */
-            uint32_t off_at = manual ? (uint32_t)(screenoff_extra > 0 ? screenoff_extra : 10)*1000
+            uint32_t off_at = (manual && th_zune()) ? 10000u   /* Zune: a woken lock screen goes dark after 10 s */
+                                     : manual ? (uint32_t)(screenoff_extra > 0 ? screenoff_extra : 10)*1000
                                      : (uint32_t)(saver_timeout+screenoff_extra)*1000;
             if(bl_state==1 && (manual || screenoff_extra > 0) && idle > off_at){
                 ui_backlight(0); bl_state = 2;
+                zpwr_log("dark scr=%d manual=%d", screen_current(), manual);
                 /* screen fully off -> STOP the screensaver. Leaving SCR_SAVER: (a) satisfies "the
                  * saver stops when the screen turns off"; (b) pops back to the screen shown BEFORE
                  * the saver, so a later wake lands there, not on the saver; (c) makes saver_anim_cb
                  * a no-op (it self-gates on screen_current()==SCR_SAVER) so the analog seconds hand
                  * stops. SAVER transitions are instant (no slide) - one cheap repaint behind a dark
                  * panel. Guard on ==SCR_SAVER: a merely-dimmed non-saver screen has nothing to pop. */
-                if(screen_current()==SCR_SAVER) screen_back();
+                if(screen_current()==SCR_SAVER && !th_zune()) screen_back();   /* Zune keeps it: a wake lands there */
             }
         }
 
@@ -3925,13 +4109,31 @@ int main(int argc, char **argv){
          * swallows its own waking tap), LVGL gets no touch at all; a touch only wakes it (the raw path above), and
          * the buttons listen again once that finger has lifted (or after 3 s, so touch can never stay dead). */
         if(g_touch){
-            int gate = bl_state == 2 || (bl_state == 1 && screen_current() != SCR_SAVER);
+            int gate = bl_state == 2 || (bl_state == 1 && screen_current() != SCR_SAVER)
+                    || (th_zune() && screen_current() == SCR_SAVER)
+                    || (g_zunlock_at && lv_tick_elaps(g_zunlock_at) < 400);   /* ...and a moment after it, so the tap dies */
+            if(g_zunlock_at && lv_tick_elaps(g_zunlock_at) >= 400) g_zunlock_at = 0;   /* Zune lock screen: the raw path unlocks; LVGL never sees that tap */
             if(touch_gate_wake && lv_tick_elaps(touch_gate_wake) > 3000) touch_gate_wake = 0;
             int want_off = gate || touch_gate_wake;
             if(want_off != touch_gate_on){
                 touch_gate_on = want_off;
                 if(!want_off) lv_indev_reset(g_touch, NULL);                   /* start clean: no half press left over */
                 lv_indev_enable(g_touch, !want_off);
+            }
+        }
+        {   /* a dark panel shows black pixels too: with the backlight cut the LCD still holds its picture, and it can be made
+             * out faintly in daylight. A black cover on the system layer goes up when the panel goes dark and comes off
+             * on any wake; while it's up LVGL draws only the cover, so a dark screen also costs no rendering. */
+            static lv_obj_t *dark_cover;
+            if(bl_state == 2 && !dark_cover){
+                dark_cover = lv_obj_create(lv_layer_sys()); lv_obj_remove_style_all(dark_cover);
+                lv_obj_set_size(dark_cover, LV_PCT(100), LV_PCT(100));
+                lv_obj_set_style_bg_color(dark_cover, TC(FIXED_MEDIA_BLACK), 0); lv_obj_set_style_bg_opa(dark_cover, LV_OPA_COVER, 0);
+                lv_obj_remove_flag(dark_cover, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+                lv_refr_now(NULL);
+            } else if(bl_state != 2 && dark_cover){
+                lv_obj_delete(dark_cover); dark_cover = NULL;
+                lv_refr_now(NULL);
             }
         }
         polls_set_paused(bl_state == 2);
@@ -3965,6 +4167,7 @@ int main(int argc, char **argv){
           unsigned long long body = (unsigned long long)(pc.tv_sec - pa.tv_sec) * 1000000000ULL + (unsigned long long)(pc.tv_nsec - pa.tv_nsec) - prof_h;
           prof_loop(busy, bl_state, lv_anim_count_running(), prof_h, body); }
 #endif
+        g_loop_beat++; g_beat_bl = bl_state; g_beat_scr = screen_current();
         usleep(wait*1000);
     }
     return 0;

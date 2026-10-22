@@ -132,7 +132,118 @@ static void custom_done_cb(lv_event_t *e){
     paint();
 }
 
+
+/* ---- Zune (Figma 77): twelve swatches round the rim, the pick big in the middle in its own colour, with a switch and
+ * a progress line to preview it on; "apply" re-launches the screen in it (the theme's palette is fixed per launch) ---- */
+LV_FONT_DECLARE(font_zune_light_32) LV_FONT_DECLARE(font_zune_semibold_11) LV_FONT_DECLARE(font_zune_regular_13)
+LV_FONT_DECLARE(font_zune_regular_14)
+const lv_font_t *zune_font(const lv_font_t *base);
+lv_obj_t *zune_pivot(lv_obj_t *root, const char *title, lv_event_cb_t back_cb);
+#define ZNSW 12
+static const uint32_t ZSW_RGB[ZNSW] = { 0xEC008C, 0xA200FF, 0x0050EF, 0x1BA1E2, 0x00ABA9, 0x008A00,
+                                        0xA4C400, 0xF0A30A, 0xFA6800, 0xE51400, 0xA20025, 0xF472D0 };
+static const char *const ZSW_NAME[ZNSW] = { "magenta", "purple", "cobalt", "cyan", "teal", "emerald",
+                                            "lime", "amber", "orange", "red", "crimson", "pink" };
+static lv_obj_t *g_zsw[ZNSW], *g_zring[ZNSW], *g_ztick[ZNSW], *g_zname, *g_zsw_on, *g_zfill, *g_zapply;
+static int g_zpick, g_zcur;
+static void zpaint(void){
+    lv_color_t c = theme_color_from_rgb(ZSW_RGB[g_zpick]);
+    for(int i = 0; i < ZNSW; i++){
+        int on = i == g_zpick;
+        lv_obj_set_size(g_zsw[i], on ? 34 : 28, on ? 34 : 28);
+        if(on) lv_obj_remove_flag(g_zring[i], LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(g_zring[i], LV_OBJ_FLAG_HIDDEN);
+        if(on) lv_obj_remove_flag(g_ztick[i], LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(g_ztick[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_label_set_text(g_zname, ZSW_NAME[g_zpick]); lv_obj_set_style_text_color(g_zname, c, 0);
+    lv_obj_set_style_bg_color(g_zsw_on, c, 0); lv_obj_set_style_bg_color(g_zfill, c, 0);
+    lv_label_set_text(g_zapply, g_zpick == g_zcur ? "current" : "apply");
+    lv_obj_set_style_text_color(g_zapply, g_zpick == g_zcur ? TC(TEXT_MUTED) : c, 0);
+}
+static void zswatch_cb(lv_event_t *e){ g_zpick = (int)(intptr_t)lv_event_get_user_data(e); zpaint(); }
+static void zapply_cb(lv_event_t *e){
+    (void)e;
+    if(g_zpick == g_zcur){ screen_back(); return; }
+    int prev = cfg_get_int("zune_accent", 0xEC008C);
+    cfg_set_int("zune_accent", (int)ZSW_RGB[g_zpick]);
+    ui_toast("Restarting the screen - your music keeps playing");
+    if(ui_theme_reload("settings") != 0){ cfg_set_int("zune_accent", prev); ui_toast("Couldn't change it - try again"); }
+}
+static lv_obj_t *g_zart_l;
+void ui_zune_art_sync(void);
+static void zart_paint(void){
+    int on = cfg_get_int("zune_accent_art", 0);
+    lv_label_set_text(g_zart_l, on ? "from album art \xC2\xB7 on" : "from album art \xC2\xB7 off");
+    lv_obj_set_style_text_color(g_zart_l, on ? TC(ACCENT_PRIMARY) : TC(TEXT_SECONDARY), 0);
+}
+static void zart_cb(lv_event_t *e){
+    (void)e;
+    int on = !cfg_get_int("zune_accent_art", 0);
+    cfg_set_int("zune_accent_art", on); ui_zune_art_sync(); ui_art_retry();
+    ui_toast(on ? "now playing takes its colour from the album" : "now playing uses your accent");
+    zart_paint();
+}
+static void zcp_open(void){
+    int cur = cfg_get_int("zune_accent", 0xEC008C); g_zcur = 0;
+    for(int i = 0; i < ZNSW; i++) if((int)ZSW_RGB[i] == (cur & 0xFFFFFF)) g_zcur = i;
+    g_zpick = g_zcur; zpaint();
+    if(g_zart_l) zart_paint();
+}
+static void zcp_create(lv_obj_t *root){
+    lv_obj_set_style_bg_color(root, TC(CANVAS), 0); lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);
+    for(int i = 0; i < ZNSW; i++){
+        float a = (-90.0f + i * 30.0f) * 0.0174533f;
+        int cx = 180 + (int)lroundf(146 * cosf(a)), cy = 180 + (int)lroundf(146 * sinf(a));
+        lv_obj_t *r = lv_obj_create(root); lv_obj_remove_style_all(r); kit_keep(r); g_zring[i] = r;
+        lv_obj_set_size(r, 46, 46); lv_obj_set_pos(r, cx - 23, cy - 23); lv_obj_set_style_radius(r, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_border_width(r, 2, 0); lv_obj_set_style_border_color(r, TC(TEXT_PRIMARY), 0);
+        lv_obj_remove_flag(r, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_t *d = lv_obj_create(root); lv_obj_remove_style_all(d); kit_keep(d); g_zsw[i] = d;
+        lv_obj_set_size(d, 28, 28); lv_obj_align(d, LV_ALIGN_TOP_LEFT, 0, 0);
+        lv_obj_set_style_radius(d, LV_RADIUS_CIRCLE, 0); lv_obj_set_style_bg_color(d, theme_color_from_rgb(ZSW_RGB[i]), 0);
+        lv_obj_set_style_bg_opa(d, LV_OPA_COVER, 0);
+        lv_obj_set_align(d, LV_ALIGN_CENTER); lv_obj_set_pos(d, cx - 180, cy - 180);
+        lv_obj_remove_flag(d, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_t *t = lv_label_create(d); kit_keep(t); g_ztick[i] = t; lv_label_set_text(t, LV_SYMBOL_OK);
+        lv_obj_set_style_text_font(t, TF(UI_14), 0); lv_obj_set_style_text_color(t, TC(FIXED_MEDIA_WHITE), 0); lv_obj_center(t);
+        lv_obj_t *h = lv_obj_create(root); lv_obj_remove_style_all(h); kit_keep(h);   /* a small target, a wide hit area */
+        lv_obj_set_size(h, 20, 20); lv_obj_set_pos(h, cx - 10, cy - 10);
+        lv_obj_add_flag(h, LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(h, LV_OBJ_FLAG_SCROLLABLE); lv_obj_set_ext_click_area(h, 10);
+        lv_obj_add_event_cb(h, zswatch_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+    }
+    lv_obj_t *cap = lv_label_create(root); kit_keep(cap); lv_label_set_text(cap, "ACCENT COLOUR");
+    lv_obj_set_style_text_font(cap, &font_zune_semibold_11, 0); lv_obj_set_style_text_letter_space(cap, 2, 0);
+    lv_obj_set_style_text_color(cap, TC(TEXT_MUTED), 0); lv_obj_align(cap, LV_ALIGN_TOP_MID, 0, 104);
+    g_zname = lv_label_create(root); kit_keep(g_zname);
+    lv_obj_set_style_text_font(g_zname, zune_font(&font_zune_light_32), 0); lv_obj_align(g_zname, LV_ALIGN_TOP_MID, 0, 120);
+    g_zsw_on = lv_obj_create(root); lv_obj_remove_style_all(g_zsw_on); kit_keep(g_zsw_on);   /* a sample switch, on */
+    lv_obj_set_size(g_zsw_on, 34, 18); lv_obj_set_pos(g_zsw_on, 116, 180);
+    lv_obj_set_style_radius(g_zsw_on, LV_RADIUS_CIRCLE, 0); lv_obj_set_style_bg_opa(g_zsw_on, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(g_zsw_on, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *k = lv_obj_create(g_zsw_on); lv_obj_remove_style_all(k); kit_keep(k);
+    lv_obj_set_size(k, 12, 12); lv_obj_set_style_radius(k, LV_RADIUS_CIRCLE, 0); lv_obj_set_style_bg_opa(k, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(k, TC(FIXED_MEDIA_WHITE), 0); lv_obj_align(k, LV_ALIGN_RIGHT_MID, -3, 0);
+    lv_obj_t *sl = lv_label_create(root); kit_keep(sl); lv_label_set_text(sl, "shuffle all");
+    lv_obj_set_style_text_font(sl, zune_font(&font_zune_regular_13), 0); lv_obj_set_style_text_color(sl, TC(TEXT_PRIMARY), 0);
+    lv_obj_set_pos(sl, 160, 180);
+    lv_obj_t *tr = lv_obj_create(root); lv_obj_remove_style_all(tr); kit_keep(tr);           /* a sample progress line */
+    lv_obj_set_size(tr, 120, 3); lv_obj_set_pos(tr, 120, 214); lv_obj_set_style_bg_color(tr, TC(CONTROL_TRACK), 0);
+    lv_obj_set_style_bg_opa(tr, LV_OPA_COVER, 0); lv_obj_remove_flag(tr, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    g_zfill = lv_obj_create(tr); lv_obj_remove_style_all(g_zfill); kit_keep(g_zfill);
+    lv_obj_set_size(g_zfill, 70, 3); lv_obj_set_style_bg_opa(g_zfill, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(g_zfill, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    g_zapply = lv_label_create(root); kit_keep(g_zapply);
+    lv_obj_set_style_text_font(g_zapply, zune_font(&font_zune_regular_14), 0); lv_obj_align(g_zapply, LV_ALIGN_TOP_MID, 0, 240);
+    lv_obj_add_flag(g_zapply, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_ext_click_area(g_zapply, 14);
+    lv_obj_add_event_cb(g_zapply, zapply_cb, LV_EVENT_CLICKED, NULL);
+    g_zart_l = lv_label_create(root); kit_keep(g_zart_l);                        /* Figma 77: "from album art" */
+    lv_obj_set_style_text_font(g_zart_l, zune_font(&font_zune_regular_13), 0); lv_obj_align(g_zart_l, LV_ALIGN_TOP_MID, 0, 268);
+    lv_obj_add_flag(g_zart_l, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_ext_click_area(g_zart_l, 12);
+    lv_obj_add_event_cb(g_zart_l, zart_cb, LV_EVENT_CLICKED, NULL);
+    zcp_open();
+}
 void colorpick_open(void){
+    if(th_zune()){ if(g_zname) zcp_open(); screen_show(SCR_COLORPICK); return; }
     g_mode = simple_cfg_get_int("accent_mode", 1);
     g_rgb  = simple_cfg_get_int("accent_color", UI_RED);
     int h,s,v; rgb2hsv((g_rgb>>16)&0xFF,(g_rgb>>8)&0xFF,g_rgb&0xFF,&h,&s,&v);
@@ -161,6 +272,7 @@ static lv_obj_t *pill(lv_obj_t *root, const char *txt, int x, int w, lv_event_cb
     return b;
 }
 void colorpick_create(lv_obj_t *root){
+    if(th_zune()){ zcp_create(root); return; }
     lv_obj_set_style_bg_color(root, TC(CANVAS), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
     lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);

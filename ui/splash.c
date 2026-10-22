@@ -97,8 +97,10 @@ static int disc_make(uint32_t bg){
 }
 
 /* ---- the timeline ---- */
+static void zframe(float t);
 static void splash_frame(int ms){
     float t = ms / (float)SP_MS;
+    if(th_zune()){ zframe(t); return; }
     /* spin: up to speed by 0.42, then slowing to a stop at 0.64 (the angle is the integral of the speed) */
     float ang;
     if(t < 0.42f){ float u = t / 0.42f; ang = 2900 * u * u * u; }                  /* degrees, accelerating */
@@ -169,7 +171,9 @@ static lv_obj_t *word_label(lv_obj_t *parent, const char *s, lv_color_t c){
     lv_obj_set_style_text_color(l, c, 0);
     return l;
 }
+static int zbuild(void);
 static int build(void){
+    if(th_zune()) return zbuild();
     if(!disc_make((uint32_t)lv_color_to_u32(TC(FIXED_SPLASH_BG)) & 0xFFFFFF)) return 0;
     g_sp.root = plain(lv_layer_top());
     lv_obj_set_size(g_sp.root, 360, 360);
@@ -245,4 +249,59 @@ void splash_start(void){
 void splash_test_frame(int ms){
     if(!g_sp.root && !build()) return;
     splash_frame(ms);
+}
+
+/* ==== Zune (Figma 01): "disc" in Light 64 with an accent dot, "snowsky" small and spaced under it, a hairline ring on
+ * the rim with an accent loader sweeping round it; in, a turn or two, out to Home ==== */
+LV_FONT_DECLARE(font_zune_light_64) LV_FONT_DECLARE(font_zune_semibold_11) LV_FONT_DECLARE(font_zune_regular_12)
+const lv_font_t *zune_font(const lv_font_t *base);
+static lv_obj_t *g_zword, *g_zdot, *g_zsub, *g_zload;
+static int zbuild(void){
+    g_sp.root = plain(lv_layer_top());
+    lv_obj_set_size(g_sp.root, 360, 360);
+    lv_obj_set_style_bg_color(g_sp.root, TC(CANVAS), 0); lv_obj_set_style_bg_opa(g_sp.root, LV_OPA_COVER, 0);
+    lv_obj_add_flag(g_sp.root, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_t *tr = bare_arc(g_sp.root, 176, 2, TC(CONTROL_TRACK), LV_OPA_COVER);
+    lv_arc_set_bg_angles(tr, 0, 360);
+    g_zload = bare_arc(g_sp.root, 176, 3, ui_current_accent(), LV_OPA_COVER);
+    lv_obj_set_style_arc_rounded(g_zload, true, LV_PART_MAIN);
+    lv_arc_set_bg_angles(g_zload, 270, 330);
+    g_zword = lv_label_create(g_sp.root); kit_keep(g_zword);
+    lv_label_set_text(g_zword, "disc");
+    lv_obj_set_style_text_font(g_zword, &font_zune_light_64, 0); lv_obj_set_style_text_color(g_zword, TC(TEXT_PRIMARY), 0);
+    lv_obj_update_layout(g_zword);
+    int w = lv_obj_get_width(g_zword), h = lv_obj_get_height(g_zword);
+    lv_obj_set_pos(g_zword, 180 - (w + 14) / 2, 174 - h / 2 - 8);
+    g_zdot = plain(g_sp.root);
+    lv_obj_set_size(g_zdot, 10, 10); lv_obj_set_style_radius(g_zdot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(g_zdot, ui_current_accent(), 0); lv_obj_set_style_bg_opa(g_zdot, LV_OPA_COVER, 0);
+    lv_obj_set_pos(g_zdot, 180 - (w + 14) / 2 + w + 4, 174 - h / 2 - 8 + h - 18);
+    g_zsub = lv_label_create(g_sp.root); kit_keep(g_zsub);
+    lv_label_set_text(g_zsub, "snowsky");
+    lv_obj_set_style_text_font(g_zsub, &font_zune_semibold_11, 0); lv_obj_set_style_text_letter_space(g_zsub, 3, 0);
+    lv_obj_set_style_text_color(g_zsub, TC(TEXT_MUTED), 0);
+    lv_obj_align(g_zsub, LV_ALIGN_TOP_MID, 0, 222);
+    /* which build booted: VERSION from the launcher's run record ("2.6.1-zune27" -> "zune27"), so an update can be confirmed */
+    char ver[48] = "";
+    const char *ev = getenv("ZSPLASH_VER");
+    if(ev) snprintf(ver, sizeof ver, "%s", ev);
+    else { FILE *f = fopen("/tmp/.diskos_run", "r"); char ln[160];
+           if(f){ while(fgets(ln, sizeof ln, f)) if(!strncmp(ln, "VERSION=", 8)){ ln[strcspn(ln, "\r\n")] = 0; snprintf(ver, sizeof ver, "%s", ln + 8); break; } fclose(f); } }
+    if(ver[0] && strcmp(ver, "flashed")){
+        const char *v = strchr(ver, '-'); v = v ? v + 1 : ver;
+        lv_obj_t *vl = lv_label_create(g_sp.root); kit_keep(vl); lv_label_set_text(vl, v);
+        lv_obj_set_style_text_font(vl, zune_font(&font_zune_regular_12), 0); lv_obj_set_style_text_color(vl, TC(TEXT_MUTED), 0);
+        lv_obj_align(vl, LV_ALIGN_TOP_MID, 0, 290);
+    }
+    return 1;
+}
+static void zframe(float t){
+    float in = smooth(seg(t, 0, 0.18f));
+    lv_obj_set_style_opa(g_zword, (lv_opa_t)(255 * in), 0);
+    lv_obj_set_style_opa(g_zsub, (lv_opa_t)(255 * smooth(seg(t, 0.1f, 0.3f))), 0);
+    lv_obj_set_style_opa(g_zdot, (lv_opa_t)(255 * smooth(seg(t, 0.22f, 0.32f))), 0);
+    int a = 270 + (int)(720 * ease(t));                                   /* two turns, easing out */
+    int len = 40 + (int)(80 * smooth(seg(t, 0, 0.5f)));
+    lv_arc_set_bg_angles(g_zload, a % 360, (a + len) % 360);
+    lv_obj_set_style_opa(g_sp.root, (lv_opa_t)(255 * (1 - seg(t, 0.9f, 1))), 0);
 }

@@ -6,6 +6,18 @@ Entries follow the Keep a Changelog format, with Added, Changed, and Fixed categ
 diskOS remains beta software; version numbers do not imply broad hardware or feature validation.
 
 
+## [2.6.1-zune] - 2026-10-22 (fork)
+
+- Added the **Zune** theme (preset 13): a looping home list, round momentum dials for lists and settings,
+  a Now Playing view with the seek ring and an optional album-art accent, and a lock screen showing album art
+  or the clock. Wi-Fi, Bluetooth, charging, library scan, search, EQ and confirm screens are themed as well.
+  See [docs/ZUNE.md](docs/ZUNE.md).
+- Added **usb-c audio** to Working mode and an Output picker (Zune). If the Disc powers off on USB-C, it starts on
+  the internal output next time.
+- Locking now fully blanks the screen. The 2% shutdown countdown waits for two readings in a row.
+- Faster drawing: LVGL draw/layout hot paths and the Zune list layout are built with -O2, and the circle
+  cache is larger.
+
 ## [2.6.1] - 2026-10-21
 
 - Bluetooth: headphones no longer drop mid-song. A late answer from the link check (busy Disc, screen off) is no

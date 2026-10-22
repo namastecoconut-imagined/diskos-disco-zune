@@ -15,6 +15,9 @@
 #include <stdatomic.h>
 #include <unistd.h>
 #include "art.h"
+#include "zune_dial.h"
+#include "theme_kit.h"
+LV_FONT_DECLARE(font_zune_light_21) LV_FONT_DECLARE(font_zune_regular_13) LV_FONT_DECLARE(font_zune_light_50)
 
 /* Album Wall: an Apple-style COVER FLOW that FLOWS. The centred album faces the viewer; the covers to
  * each side are angled (an affine squash, dimmed) with a faded reflection. A swipe slides the whole strip
@@ -42,7 +45,8 @@ static lv_obj_t *g_root;
 static lv_obj_t *g_front[AW_CARDS];   /* facing sprite widget per card */
 static lv_obj_t *g_side[AW_CARDS];    /* turned sprite widget per card */
 static lv_obj_t *g_initial;
-static lv_obj_t *g_name, *g_artist, *g_counter;
+static lv_obj_t *g_name, *g_artist, *g_counter, *g_zpos;   /* g_zpos: Zune's position arc at the bottom */
+#define AW_Y (th_zune() ? 103 : 72)   /* the facing cover's top (Zune, Figma 31:105: under the pivot title) */
 
 static char  (*g_names)[MDB_STR];
 static char  (*g_artists)[MDB_STR];
@@ -134,6 +138,7 @@ static aw_job_t aw_jobs[AW_LRU];static int aw_head,aw_tail,aw_count,aw_worker_st
 static aw_result_t aw_result;static int aw_result_ready;
 static atomic_uint aw_epoch=1;static atomic_int aw_on;
 void ui_decode_lock(void);void ui_decode_unlock(void);int ui_art_foreground_busy(void);
+static void aw_labels(void);
 static void aw_result_free(aw_result_t*r){free(r->front);free(r->side);memset(r,0,sizeof*r);}
 static void aw_cancel_jobs(void){
     atomic_fetch_add(&aw_epoch,1);pthread_mutex_lock(&aw_mu);aw_head=aw_tail=aw_count=0;
@@ -189,6 +194,7 @@ static void aw_apply_ready(void){
         if(r.ok){lv_image_cache_drop(&sp->fdsc);lv_image_cache_drop(&sp->sdsc);free(sp->fbuf);free(sp->sbuf);
             sp->fbuf=r.front;sp->sbuf=r.side;r.front=r.side=NULL;aw_set_dsc(&sp->fdsc,sp->fbuf,AW_SRC,AW_SPR_H);aw_set_dsc(&sp->sdsc,sp->sbuf,AW_SIDE_W,AW_SPR_H);sp->has_cover=1;
             for(int i=0;i<AW_CARDS;i++){if(g_front[i])lv_obj_invalidate(g_front[i]);if(g_side[i])lv_obj_invalidate(g_side[i]);}
+            if(r.job.idx==g_cur) aw_labels();                 /* the centre's cover arrived: drop its initial */
         }
     }
     aw_result_free(&r);
@@ -254,11 +260,25 @@ static void aw_render_card(int c){
     else { fo = 0; so = 255; }
     fo = fo*fade/255; so = so*fade/255;
 
+    if(th_zune()){                                /* Zune (Figma 31:105): flat covers sweeping down an arc, shrinking and dimming */
+        float b = a > 2.0f ? 2.0f : a, sd = epos < 0 ? -1.0f : 1.0f;
+        float sz = b <= 1 ? 150 - 54 * b : 96 - 32 * (b - 1);
+        float xc = 180 + sd * (b <= 1 ? 82 * b : 82 + 49 * (b - 1));
+        float yc = 178 + (b <= 1 ? 15 * b : 15 + 41 * (b - 1));
+        int op = (int)(b <= 1 ? 255 - 105 * b : 150 - 70 * (b - 1)); op = op * fade / 255;
+        lv_obj_set_style_transform_pivot_x(fi, AW_SRC/2, 0); lv_obj_set_style_transform_pivot_y(fi, AW_SRC/2, 0);
+        lv_obj_set_style_transform_scale(fi, (int32_t)(sz * 256 / AW_SRC), 0);
+        lv_obj_set_pos(fi, (int)(xc - AW_SRC/2), (int)(yc - AW_SRC/2));
+        lv_obj_set_style_image_opa(fi, (lv_opa_t)op, 0);
+        if(op > 0) lv_obj_clear_flag(fi, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(fi, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(si, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
     float x = aw_xmap(epos);
-    lv_obj_set_pos(fi, (int)(x - AW_SRC/2), 72);
+    lv_obj_set_pos(fi, (int)(x - AW_SRC/2), AW_Y);
     lv_obj_set_style_image_opa(fi, (lv_opa_t)fo, 0);
     if(fo>0) lv_obj_clear_flag(fi, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(fi, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_set_pos(si, (int)(x - AW_SIDE_W/2), 78);
+    lv_obj_set_pos(si, (int)(x - AW_SIDE_W/2), AW_Y + 6);
     lv_obj_set_style_image_opa(si, (lv_opa_t)so, 0);
     if(so>0) lv_obj_clear_flag(si, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(si, LV_OBJ_FLAG_HIDDEN);
 }
@@ -277,6 +297,8 @@ static void aw_labels(void){
     lv_label_set_text(g_name, g_names[g_cur]);
     lv_label_set_text(g_artist, g_artists[g_cur][0]?g_artists[g_cur]:"Unknown artist");
     char cc[24]; snprintf(cc,sizeof cc,"%d / %d", g_cur+1, g_nalb); lv_label_set_text(g_counter, cc);
+    if(g_zpos){ int st = 112 - (g_nalb > 1 ? g_cur * 62 / (g_nalb - 1) : 31);   /* Zune: a short arc travelling along the bottom rim */
+                lv_arc_set_bg_angles(g_zpos, st, st + 18); }
 }
 static void aw_render_all(void){ for(int c=0;c<AW_CARDS;c++) aw_render_card(c); }
 
@@ -460,7 +482,12 @@ static void aw_prefetch_cb(lv_timer_t *t){ (void)t;
 
 /* ---- lifecycle ---------------------------------------------------------------------------------- */
 static void aw_back_cb(lv_event_t *e){ if(lv_event_get_code(e)==LV_EVENT_CLICKED) screen_back(); }
-static lv_obj_t *aw_img(void){ lv_obj_t *im = lv_image_create(g_root); lv_obj_add_flag(im, LV_OBJ_FLAG_HIDDEN); return im; }
+static lv_obj_t *aw_img(void){
+    lv_obj_t *im = lv_image_create(g_root); lv_obj_add_flag(im, LV_OBJ_FLAG_HIDDEN);
+    if(th_zune()){ lv_image_set_inner_align(im, LV_IMAGE_ALIGN_TOP_LEFT); lv_obj_set_height(im, AW_SRC); }   /* Zune: no reflection (cropped off) */
+    return im;
+}
+static void aw_znext_cb(lv_event_t *e){ if(lv_event_get_code(e)==LV_EVENT_CLICKED){ void library_open_pivot(int v); library_open_pivot(2); } }
 
 void albumwall_create(lv_obj_t *root){
     g_root = root;
@@ -507,6 +534,20 @@ void albumwall_refresh(void){
     for(int c=0;c<AW_CARDS;c++){ g_front[c]=NULL; g_side[c]=NULL; }
     lv_obj_set_style_bg_color(g_root, TC(CANVAS), 0);
     lv_obj_set_style_bg_opa(g_root, LV_OPA_COVER, 0);
+    g_zpos = NULL;
+    if(th_zune()){                                      /* Zune: the albums pivot, artists peeking in at the right */
+        lv_obj_t *t = zune_pivot(g_root, "albums", aw_back_cb);
+        lv_obj_t *nx = lv_label_create(g_root); kit_keep(nx);
+        lv_label_set_text(nx, "artists"); lv_label_set_long_mode(nx, LV_LABEL_LONG_CLIP); lv_obj_set_width(nx, 200);
+        lv_obj_set_style_text_font(nx, lv_obj_get_style_text_font(t, 0), 0); lv_obj_set_style_text_letter_space(nx, -2, 0);
+        lv_obj_set_style_text_color(nx, TC(TEXT_PRIMARY), 0); lv_obj_set_style_text_opa(nx, LV_OPA_40, 0);
+        lv_point_t sz; lv_text_get_size(&sz, "albums", lv_obj_get_style_text_font(t, 0), -2, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        lv_obj_update_layout(t);
+        lv_obj_set_pos(nx, lv_obj_get_x(t) + sz.x + 24, lv_obj_get_y(t));
+        lv_obj_add_flag(nx, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_ext_click_area(nx, 8);
+        lv_obj_add_event_cb(nx, aw_znext_cb, LV_EVENT_CLICKED, NULL);
+        zune_status(g_root, SCR_ALBUMWALL);
+    } else
     ui_header_cb(g_root, "Albums", aw_back_cb);
 
     g_nalb = g_names ? mdb_albums(g_names, g_artists, g_counts, g_names_cap) : 0;
@@ -529,7 +570,8 @@ void albumwall_refresh(void){
     g_initial = lv_label_create(g_root);
     lv_obj_set_style_text_font(g_initial, ui_text_font(20), 0);
     lv_obj_set_style_text_color(g_initial, TC(TEXT_MUTED), 0);
-    lv_obj_align(g_initial, LV_ALIGN_TOP_MID, 0, 72 + AW_SRC/2 - 12);
+    lv_obj_align(g_initial, LV_ALIGN_TOP_MID, 0, AW_Y + AW_SRC/2 - 12);
+    if(th_zune()){ lv_obj_set_style_text_font(g_initial, zune_font(&font_zune_light_50), 0); lv_obj_align(g_initial, LV_ALIGN_TOP_MID, 0, AW_Y + AW_SRC/2 - 34); }
     lv_obj_add_flag(g_initial, LV_OBJ_FLAG_HIDDEN);
 
     g_name = lv_label_create(g_root);
@@ -546,5 +588,16 @@ void albumwall_refresh(void){
     lv_obj_align(g_counter, LV_ALIGN_TOP_MID, 0, 318);
     lv_obj_set_style_text_font(g_counter, TF(UI_14), 0); lv_obj_set_style_text_color(g_counter, TC(TEXT_DISABLED), 0);
 
+    if(th_zune()){                                      /* Zune: Light title, quiet artist, an arc instead of "3 / 12" */
+        lv_obj_set_style_text_font(g_name, zune_font(&font_zune_light_21), 0); lv_obj_set_height(g_name, 30);
+        lv_obj_align(g_name, LV_ALIGN_TOP_MID, 0, 270);
+        lv_obj_set_style_text_font(g_artist, zune_font(&font_zune_regular_13), 0); lv_obj_align(g_artist, LV_ALIGN_TOP_MID, 0, 298);
+        lv_obj_add_flag(g_counter, LV_OBJ_FLAG_HIDDEN);
+        g_zpos = lv_arc_create(g_root); kit_keep(g_zpos);
+        lv_obj_remove_style(g_zpos, NULL, LV_PART_KNOB); lv_obj_remove_flag(g_zpos, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_size(g_zpos, 344, 344); lv_obj_center(g_zpos);
+        lv_obj_set_style_arc_width(g_zpos, 3, LV_PART_MAIN); lv_obj_set_style_arc_rounded(g_zpos, true, LV_PART_MAIN);
+        lv_obj_set_style_arc_color(g_zpos, TC(TEXT_PRIMARY), LV_PART_MAIN); lv_obj_set_style_arc_width(g_zpos, 0, LV_PART_INDICATOR);
+    }
     aw_render_all(); aw_labels();
 }

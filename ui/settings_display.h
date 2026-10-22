@@ -114,6 +114,8 @@ static const char *display_disabled_reason(const setting_t *s){
     if(!strcmp(k,"theme_variant") && th_null())return "Null uses a fixed dark appearance. Choose a colour scheme instead.";
     if(!strcmp(k,"theme_auto") && !theme_auto_supported())return "Automatic light/dark switching is available in Disco, Ring and Braun.";
     if(!strcmp(k,"null_side"))return "Null keeps its navigation on the right.";
+    if(s->apply==apply_output && !th_zune())return "The output picker belongs to the Zune theme.";
+    if((!strcmp(k,"zlock_src") || !strcmp(k,"zlock_tint")) && !th_zune())return "This option belongs to the Zune lock screen.";
     if(!strcmp(k,"null_palette") && !th_null())return "Colour schemes are specific to Null. Use light/dark and accent settings for this theme.";
     if(!strncmp(k,"null_",5) && !th_null())return "This option is available in Null.";
     if(!strcmp(k,"simple_background") && !th_simple())return "This theme uses its own artwork background.";

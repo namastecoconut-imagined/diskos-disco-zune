@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 diskOS contributors */
 #include "screens.h"
+#include "zune_dial.h"
 #include "azjump.h"
 #include <ctype.h>
 #include "vlist.h"
@@ -179,6 +180,7 @@ static const char *fb_basename(const char *p){
 }
 
 static void fb_empty_label(const char *msg){
+    if(th_zune()){ zune_empty(g_list, msg, !strcmp(msg, "No SD card") ? "insert a microsd card with your music. the library rescans automatically." : NULL); return; }
     lv_obj_t *l = lv_label_create(g_list);
     lv_label_set_text(l, msg);
     lv_obj_set_style_text_color(l, TC(TEXT_MUTED), 0);
@@ -292,6 +294,44 @@ static void fb_add_row(int i){
             lv_obj_set_style_text_color(dt, TC(TEXT_SECONDARY), 0);
         }
         theme_list_row(r);
+        if(th_zune()){                                              /* Figma 28: icon, name in Regular 19, a quiet line */
+            LV_FONT_DECLARE(font_zune_regular_19) LV_FONT_DECLARE(font_zune_regular_12)
+            lv_obj_set_style_bg_opa(r, LV_OPA_TRANSP, LV_STATE_PRESSED); lv_obj_set_style_opa(r, LV_OPA_60, LV_STATE_PRESSED); kit_keep(r);
+            lv_obj_set_style_text_color(ic, TC(TEXT_MUTED), 0); lv_obj_set_pos(ic, 12, 10); kit_keep(ic);
+            lv_obj_set_style_text_font(nm, zune_font(&font_zune_regular_19), 0); lv_obj_set_pos(nm, 40, 2); lv_obj_set_width(nm, FB_ROW_W - 50); kit_keep(nm);
+            for(uint32_t k = 0; k < lv_obj_get_child_count(r); k++){
+                lv_obj_t *o = lv_obj_get_child(r, (int32_t)k);
+                if(o == ic || o == nm || !lv_obj_check_type(o, &lv_label_class)) continue;
+                if(en->is_dir){ lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN); continue; }
+                char lo[16]; snprintf(lo, sizeof lo, "%s", lv_label_get_text(o)); for(char *c = lo; *c; c++) if(*c >= 'A' && *c <= 'Z') *c += 32;
+                lv_label_set_text(o, lo); lv_obj_set_style_text_font(o, zune_font(&font_zune_regular_12), 0);
+                lv_obj_set_style_text_color(o, TC(TEXT_MUTED), 0); lv_obj_set_pos(o, 42, 28); kit_keep(o);
+            }
+            if(en->is_dir){ lv_obj_t *d = lv_label_create(r); kit_keep(d); lv_label_set_text(d, "folder");
+                            lv_obj_set_style_text_font(d, zune_font(&font_zune_regular_12), 0); lv_obj_set_style_text_color(d, TC(TEXT_MUTED), 0);
+                            lv_obj_set_pos(d, 42, 28); }
+        }
+}
+/* Zune: the path under the header ("sd card › music › aurora") and "play folder" beside it */
+static lv_obj_t *g_zcrumb;
+static void fb_play(const char *name);
+static void fb_zcrumb(void){
+    if(!g_zcrumb) return;
+    const char *rel = g_dir + strlen(FB_ROOT); char b[160]; size_t n = (size_t)snprintf(b, sizeof b, "sd card");
+    while(*rel == '/') rel++;
+    const char *seg = rel;
+    while(seg && *seg && n + 8 < sizeof b){
+        const char *e = strchr(seg, '/'); int len = e ? (int)(e - seg) : (int)strlen(seg);
+        n += (size_t)snprintf(b + n, sizeof b - n, " \xE2\x80\xBA %.*s", len, seg);
+        seg = e ? e + 1 : NULL;
+    }
+    for(char *c = b; *c; c++) if(*c >= 'A' && *c <= 'Z') *c += 32;
+    lv_label_set_text(g_zcrumb, b);
+}
+static void fb_zplay_cb(lv_event_t *e){
+    (void)e;
+    for(int i = 0; i < g_nent; i++) if(!g_ent[i].is_dir){ fb_play(g_ent[i].name); return; }
+    ui_toast("No songs in this folder");
 }
 
 static void fb_fill_cb(lv_timer_t *t){
@@ -307,6 +347,8 @@ static void fb_rebuild(void){
     if(g_title){
         int at_root = (strcmp(g_dir, FB_ROOT) == 0);
         theme_title_text(g_title, at_root ? "Files" : fb_basename(g_dir));
+        if(th_zune()){ char lo[128]; snprintf(lo, sizeof lo, "%s", at_root ? "folders" : fb_basename(g_dir));
+                       for(char *c = lo; *c; c++) if(*c >= 'A' && *c <= 'Z') *c += 32; lv_label_set_text(g_title, lo); fb_zcrumb(); }
     }
     if(!g_list) return;
     vlist_end(&g_fbv);
@@ -437,12 +479,25 @@ void folderbrowser_create(lv_obj_t *root){
     lv_obj_set_style_bg_color(root, TC(CANVAS), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
 
+    if(th_zune()){
+        LV_FONT_DECLARE(font_zune_regular_12) LV_FONT_DECLARE(font_zune_regular_13)
+        g_title = zune_pivot(root, "folders", fb_header_back_cb);
+        zune_status(root, SCR_FOLDER);
+        g_zcrumb = lv_label_create(root); kit_keep(g_zcrumb); lv_label_set_text(g_zcrumb, "sd card");
+        lv_label_set_long_mode(g_zcrumb, LV_LABEL_LONG_DOT); lv_obj_set_width(g_zcrumb, 150);
+        lv_obj_set_style_text_font(g_zcrumb, zune_font(&font_zune_regular_12), 0); lv_obj_set_style_text_color(g_zcrumb, TC(TEXT_MUTED), 0);
+        lv_obj_set_pos(g_zcrumb, 52, 100);
+        lv_obj_t *pf = lv_label_create(root); kit_keep(pf); lv_label_set_text(pf, "play folder");
+        lv_obj_set_style_text_font(pf, zune_font(&font_zune_regular_13), 0); lv_obj_set_style_text_color(pf, TC(ACCENT_PRIMARY), 0);
+        lv_obj_set_pos(pf, 214, 98); lv_obj_add_flag(pf, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_ext_click_area(pf, 12);
+        lv_obj_add_event_cb(pf, fb_zplay_cb, LV_EVENT_CLICKED, NULL);
+    } else
     g_title = ui_header_cb(root, "Files", fb_header_back_cb);   /* back-chevron ascends a level */
 
     g_list = lv_obj_create(root);
     lv_obj_remove_style_all(g_list);
-    lv_obj_set_pos(g_list, (360 - FB_ROW_W) / 2, 72);
-    lv_obj_set_size(g_list, FB_ROW_W, 272);
+    lv_obj_set_pos(g_list, (360 - FB_ROW_W) / 2, th_zune() ? 124 : 72);
+    lv_obj_set_size(g_list, FB_ROW_W, th_zune() ? 236 : 272);
     lv_obj_set_style_pad_bottom(g_list, 44, 0);   /* last row scrolls clear of the round bottom bezel */
     lv_obj_set_style_bg_opa(g_list, LV_OPA_TRANSP, 0);
     lv_obj_set_flex_flow(g_list, LV_FLEX_FLOW_COLUMN);

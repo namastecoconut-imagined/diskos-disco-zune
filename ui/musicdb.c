@@ -1548,10 +1548,10 @@ static int mdb_stats_list(mdb_song_t *out, int cap, int by_recent){
     sqlite3_stmt *st;
     const char *sql = by_recent
       ? "SELECT IFNULL(S.TITLE,IFNULL(S.NAME,'Untitled')),IFNULL(S.ARTIST,''),IFNULL(S.ALBUM,''),"
-        "IFNULL(S.DURATION,0),S.ID FROM PLAY_STATS P JOIN SONG S ON S.PATH=P.PATH "
+        "IFNULL(S.DURATION,0),S.ID,IFNULL(P.LAST_PLAYED,0) FROM PLAY_STATS P JOIN SONG S ON S.PATH=P.PATH "
         "WHERE lower(S.PATH) NOT LIKE '%.m4b' ORDER BY P.LAST_PLAYED DESC LIMIT ?1;"   /* books have their own view */
       : "SELECT IFNULL(S.TITLE,IFNULL(S.NAME,'Untitled')),IFNULL(S.ARTIST,''),IFNULL(S.ALBUM,''),"
-        "IFNULL(S.DURATION,0),S.ID FROM PLAY_STATS P JOIN SONG S ON S.PATH=P.PATH "
+        "IFNULL(S.DURATION,0),S.ID,IFNULL(P.LAST_PLAYED,0) FROM PLAY_STATS P JOIN SONG S ON S.PATH=P.PATH "
         "WHERE P.PLAYS>0 AND lower(S.PATH) NOT LIKE '%.m4b' ORDER BY P.PLAYS DESC, P.LAST_PLAYED DESC LIMIT ?1;";
     if(sqlite3_prepare_v2(d, sql, -1, &st, NULL) != SQLITE_OK) return 0;
     sqlite3_bind_int(st, 1, cap);
@@ -1564,6 +1564,7 @@ static int mdb_stats_list(mdb_song_t *out, int cap, int by_recent){
         s->album_h = album_hash(colt(st,2));
         s->dur_ms = sqlite3_column_int(st,3);
         s->id     = sqlite3_column_int(st,4);
+        s->played_at = sqlite3_column_int64(st,5);
         s->genre[0] = 0;
         trim(s->title); trim(s->artist); trim(s->album);
     }
@@ -2826,6 +2827,31 @@ int mdb_playlist_songs(long pid, mdb_song_t *out, int cap){
     return n;
 }
 
+/* Zune's playlist mosaic: the playlist's length (ms) and the SONG ids of its first songs from up to `cap` different
+ * albums, in playlist order. Returns the member count (0 on error). */
+int mdb_playlist_cover_ids(long pid, int *ids, int cap, int *nids, long *ms){
+    if(nids) *nids = 0; if(ms) *ms = 0;
+    if(pid <= 0) return 0;
+    sqlite3 *d = db_read(); if(!d) return 0;
+    sqlite3_stmt *st;
+    if(sqlite3_prepare_v2(d, "SELECT IFNULL(c.DURATION,0),(SELECT ID FROM SONG s WHERE s.PATH=c.PATH LIMIT 1),"
+                             "IFNULL((SELECT ALBUM FROM SONG s WHERE s.PATH=c.PATH LIMIT 1),'') "
+                             "FROM CUSTOM_PLAYLIST c WHERE c.PLAYLIST_ID=? ORDER BY c.ID;", -1, &st, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int64(st, 1, pid);
+    int n = 0, k = 0; unsigned seen[8]; long t = 0;
+    while(sqlite3_step(st) == SQLITE_ROW){
+        n++; t += sqlite3_column_int(st, 0);
+        int id = sqlite3_column_int(st, 1);
+        if(id > 0 && k < cap && k < 8){
+            unsigned h = album_hash(colt(st, 2)); int dup = 0;
+            for(int j = 0; j < k; j++) if(seen[j] == h) dup = 1;
+            if(!dup){ seen[k] = h; ids[k++] = id; }
+        }
+    }
+    sqlite3_finalize(st);
+    if(nids) *nids = k; if(ms) *ms = t;
+    return n;
+}
 /* Track count in a playlist. */
 int mdb_playlist_count(long pid){
     sqlite3 *d = db_read(); if(!d) return 0;

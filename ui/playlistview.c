@@ -9,10 +9,14 @@
 #include "i18n.h"
 #include "theme_kit.h"
 #include "musicdb.h"
+#include "zune_dial.h"
+#include "zune_thumbs.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
+#include <math.h>
 #define PLV_MAX_ROWS 8192   /* rows shown (well under LVGL's uint16 child count); playback still uses the whole playlist */
 
 /* Playlist detail (SCR_PLVIEW): opened by tapping a playlist in the Library.
@@ -61,8 +65,10 @@ static void clear_cb(lv_event_t *e){
 static vlist_t g_plv;
 static void plv_song_cb(lv_event_t *e);
 static void plv_remove_cb(lv_event_t *e);
+static void zplv_row(int i);
 static void plv_add_row(int i){
         if(i < 0 || i >= g_pl_n) return;
+        if(th_zune()){ zplv_row(i); return; }
         lv_obj_t *r = lv_button_create(g_song_list);
         lv_obj_remove_style_all(r);
         lv_obj_set_size(r, 280, 46);
@@ -87,7 +93,8 @@ static void plv_add_row(int i){
         lv_obj_set_style_text_color(a, TC(TEXT_LYRICS), 0);
         ui_library_row(r);
 }
-static void plv_scroll_cb(lv_event_t *e){ (void)e; vlist_follow(&g_plv); }
+void zplv_curve(void);
+static void plv_scroll_cb(lv_event_t *e){ (void)e; vlist_follow(&g_plv); if(th_zune()) zplv_curve(); }
 static void plv_reload(void);   /* fwd */
 /* Long-press a song row -> remove it from the playlist (L32). Uses the 1-based display ordinal
  * bound to the row, matching mdb_playlist_songs()'s order. */
@@ -117,6 +124,7 @@ static void plv_reload(void){
     if(!g_song_list) return;
     vlist_end(&g_plv);
     lv_obj_clean(g_song_list);
+    if(th_zune()){ void zplv_header(void); zplv_header(); }
     free(g_pl_songs); g_pl_songs = NULL; g_pl_n = 0;
     /* size to the real song count (no 300 cap). songs[] is only read while building the rows
      * (plv_song_cb replays by id+position, not a retained pointer) -> malloc + free here. */
@@ -130,6 +138,7 @@ static void plv_reload(void){
      * simply shows its first 8192. (Playback still uses the full playlist via id+position replay.) */
     if(n > PLV_MAX_ROWS) n = PLV_MAX_ROWS;
     pl_set_transport_enabled(n > 0);
+    if(n<=0 && th_zune()){ free(songs); return; }                 /* Zune: the header says "empty" */
     if(n<=0){
         free(songs);   /* NULL-safe */
         lv_obj_t *l = lv_label_create(g_song_list);
@@ -140,6 +149,14 @@ static void plv_reload(void){
         return;
     }
     g_pl_songs = songs; g_pl_n = n;                  /* kept: rows are created as they scroll into view */
+    if(th_zune()){                                             /* Zune: compact rows under the header (kept scroll in edit) */
+        extern int g_zplv_keep_y; int ky = g_zplv_keep_y; g_zplv_keep_y = 0;
+        if(n >= VLIST_MIN) vlist_begin(&g_plv, g_song_list, n, 30, 4, 250, 360, plv_add_row);
+        else for(int i = 0; i < n; i++) plv_add_row(i);
+        lv_obj_update_layout(g_song_list); lv_obj_scroll_to_y(g_song_list, ky, LV_ANIM_OFF);
+        void zplv_curve(void); zplv_curve();
+        return;
+    }
     lv_obj_scroll_to_y(g_song_list, 0, LV_ANIM_OFF);
     if(n >= VLIST_MIN) vlist_begin(&g_plv, g_song_list, n, 46, 6, 0, 226, plv_add_row);
     else for(int i = 0; i < n; i++) plv_add_row(i);
@@ -158,8 +175,9 @@ void plview_release(void){
     free(g_pl_songs); g_pl_songs = NULL; g_pl_n = 0;
 }
 
+void zplv_reset(void);
 void plview_open(long pid, const char *name){
-    g_pid = pid;
+    g_pid = pid; zplv_reset();
     snprintf(g_name, sizeof g_name, "%s", name ? name : "Playlist");
     screen_show(SCR_PLVIEW);   /* transition() calls plview_refresh() -> plv_reload() */
 }
@@ -237,8 +255,13 @@ static lv_obj_t *card_btn(lv_obj_t *p, int y, int w, const char *txt, lv_color_t
     lv_obj_center(l);
     return b;
 }
+static void zplv_delete(void){
+    int ok = mdb_playlist_delete(g_pid);
+    if(ok){ ui_toast("Playlist deleted"); screen_back(); library_refresh(); } else ui_toast("Delete failed");
+}
 static void show_delete_confirm(void){
     close_pop(&g_menu);
+    if(th_zune()){ zune_confirm("delete playlist?", "the songs stay on the card.", "cancel", "delete", zplv_delete); return; }
     lv_obj_t *dc = card(264, 200);   /* card() sets g_dialog = the full-screen backdrop; content goes on dc */
     lv_obj_t *t = lv_label_create(dc);
     lv_label_set_text(t, "Delete playlist?");
@@ -259,7 +282,8 @@ static void rename_done(const char *name){
     if(!name || !name[0]) return;
     if(mdb_playlist_rename(g_pid, name)){
         snprintf(g_name, sizeof g_name, "%s", name);
-        theme_title_text(g_title_lbl, g_name);
+        if(g_title_lbl) theme_title_text(g_title_lbl, g_name);
+        if(th_zune()) plv_reload();                       /* Zune: the name is in the header */
         library_refresh();   /* rebuild the Playlists list so its row shows the new name (delete already does this) */
         ui_toast("Renamed");
     } else {
@@ -333,9 +357,11 @@ static lv_obj_t *icon_btn(lv_obj_t *root, int x, int y, int w, const char *sym,
     lv_obj_center(l);
     return b;
 }
+static void zplv_create(lv_obj_t *root);
 void plview_create(lv_obj_t *root){
     lv_obj_set_style_bg_color(root, TC(CANVAS), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
+    if(th_zune()){ zplv_create(root); return; }
 
     g_title_lbl = ui_header_cb(root, "Playlist", back_cb);   /* shared header; dynamic title = playlist name */
     lv_obj_set_style_text_align(g_title_lbl, LV_TEXT_ALIGN_CENTER, 0);
@@ -384,3 +410,133 @@ void plview_create(lv_obj_t *root){
 }
 
 lv_obj_t *playlistview_scroller(void){ return g_song_list; }
+
+/* ==== Zune (Figma 26 "Playlist detail / edit"): the album-detail layout with a 2 x 2 mosaic; "edit" turns the
+ * info column into rename / delete / done and puts an accent minus on every song (tap it to remove the song) ==== */
+LV_FONT_DECLARE(font_zune_light_18) LV_FONT_DECLARE(font_zune_regular_13) LV_FONT_DECLARE(font_zune_regular_14)
+LV_FONT_DECLARE(font_zune_regular_15) LV_FONT_DECLARE(font_zune_semibold_22)
+int g_zplv_keep_y;
+static int g_zedit;
+static char g_znow_t[160], g_znow_a[160];                          /* the playing song (playlist rows carry no song id) */
+static void zplv_link(lv_obj_t *p, int x, int y, const char *t, int quiet, lv_event_cb_t cb, const char *act){
+    lv_obj_t *o = lv_obj_create(p); lv_obj_remove_style_all(o); kit_keep(o);
+    lv_obj_set_size(o, LV_SIZE_CONTENT, LV_SIZE_CONTENT); lv_obj_set_pos(o, x, y);
+    lv_obj_add_flag(o, LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_ext_click_area(o, 8); lv_obj_set_style_opa(o, LV_OPA_50, LV_STATE_PRESSED);
+    lv_obj_t *l = lv_label_create(o); kit_keep(l); lv_label_set_text(l, t);
+    lv_obj_set_style_text_font(l, zune_font(quiet ? &font_zune_regular_14 : &font_zune_regular_15), 0);
+    lv_obj_set_style_text_color(l, quiet ? TC(TEXT_MUTED) : TC(ACCENT_PRIMARY), 0);
+    ui_on(o, cb, LV_EVENT_CLICKED, NULL, act, UI_CORE);
+}
+static void zplv_redo(void){ g_zplv_keep_y = g_song_list ? lv_obj_get_scroll_y(g_song_list) : 0; plv_reload(); }
+static void zedit_cb(lv_event_t *e){ if(lv_event_get_code(e) == LV_EVENT_CLICKED){ g_zedit = 1; zplv_redo(); } }
+static void zdone_cb(lv_event_t *e){ if(lv_event_get_code(e) == LV_EVENT_CLICKED){ g_zedit = 0; zplv_redo(); } }
+static void zminus_cb(lv_event_t *e){
+    if(lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    int pos = (int)(intptr_t)lv_event_get_user_data(e);
+    if(mdb_playlist_remove_at(g_pid, pos)){ zplv_redo(); library_refresh(); }
+    else ui_toast("Couldn't remove that song");
+}
+void zplv_header(void){
+    track_state_t cs; ipc_get_state(&cs);
+    snprintf(g_znow_t, sizeof g_znow_t, "%s", cs.have_track ? cs.title : ""); snprintf(g_znow_a, sizeof g_znow_a, "%s", cs.have_track ? cs.artist : "");
+    lv_obj_t *h = lv_obj_create(g_song_list); lv_obj_remove_style_all(h); kit_keep(h);
+    lv_obj_set_size(h, 360, 246); lv_obj_remove_flag(h, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    int ids[4], ni = 0; long ms = 0;
+    int cnt = zthumb_playlist(g_pid, ids, &ni, &ms);
+    zthumb_mosaic(h, -46, 48, 192, ids, ni);
+    const lv_font_t *ft = zune_font(&font_zune_semibold_22), *fm = zune_font(&font_zune_regular_13);
+    lv_point_t sz; lv_text_get_size(&sz, g_name, ft, 0, 0, 158, LV_TEXT_FLAG_NONE);
+    int lh = lv_font_get_line_height(ft), th = sz.y > lh ? 2 * lh : lh, y = 62;
+    lv_obj_t *t = lv_label_create(h); lv_label_set_text(t, g_name); lv_label_set_long_mode(t, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(t, ft, 0); lv_obj_set_style_text_color(t, TC(TEXT_PRIMARY), 0);
+    lv_obj_set_pos(t, 166, y); lv_obj_set_size(t, 158, th); y += th + 2;
+    char meta[64];
+    if(cnt > 0){ int min = (int)((ms + 30000) / 60000); char tm[24];
+        if(min >= 60) snprintf(tm, sizeof tm, "%dh %dm", min / 60, min % 60); else snprintf(tm, sizeof tm, "%dm", min);
+        snprintf(meta, sizeof meta, "%d song%s \xC2\xB7 %s", cnt, cnt == 1 ? "" : "s", tm); }
+    else snprintf(meta, sizeof meta, "empty \xC2\xB7 add songs from now playing");
+    lv_obj_t *m = lv_label_create(h); lv_label_set_text(m, meta); lv_label_set_long_mode(m, LV_LABEL_LONG_WRAP); lv_obj_set_width(m, 150);
+    lv_obj_set_style_text_font(m, fm, 0); lv_obj_set_style_text_color(m, TC(TEXT_MUTED), 0); lv_obj_set_pos(m, 166, y);
+    lv_obj_update_layout(m); y += lv_obj_get_height(m) + 14; if(y < 132) y = 132;
+    if(!g_zedit){
+        if(cnt > 0){ zplv_link(h, 166, y, "play", 0, play_cb, "plview.zune.play"); zplv_link(h, 213, y, "shuffle", 0, shuffle_cb, "plview.zune.shuffle"); y += 26; }
+        zplv_link(h, 166, y, "edit", 0, zedit_cb, "plview.zune.edit");
+    } else {
+        zplv_link(h, 166, y, "rename", 0, rename_cb, "plview.zune.rename"); y += 26;
+        zplv_link(h, 166, y, "delete", 1, del_menu_cb, "plview.zune.delete");
+        if(cnt > 0) zplv_link(h, 226, y, "export", 1, export_cb, "plview.zune.export");
+        y += 36;
+        zplv_link(h, 166, y, "done", 0, zdone_cb, "plview.zune.done");
+    }
+}
+static void zplv_row(int i){
+    lv_obj_t *r = lv_obj_create(g_song_list); lv_obj_remove_style_all(r);
+    lv_obj_set_size(r, 300, 30); lv_obj_add_flag(r, LV_OBJ_FLAG_USER_1);
+    lv_obj_remove_flag(r, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(r, 6, 0);
+    lv_obj_set_style_bg_color(r, TC(SURFACE), LV_STATE_PRESSED); lv_obj_set_style_bg_opa(r, LV_OPA_COVER, LV_STATE_PRESSED);
+    int x = 0;
+    if(g_zedit){                                                      /* the minus: removes this song */
+        lv_obj_t *mn = lv_obj_create(r); lv_obj_remove_style_all(mn); kit_keep(mn);
+        lv_obj_set_size(mn, 20, 20); lv_obj_align(mn, LV_ALIGN_LEFT_MID, 0, 0);
+        lv_obj_set_style_radius(mn, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(mn, TC(ACCENT_PRIMARY), 0); lv_obj_set_style_bg_opa(mn, LV_OPA_COVER, 0);
+        lv_obj_add_flag(mn, LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(mn, LV_OBJ_FLAG_SCROLLABLE); lv_obj_set_ext_click_area(mn, 10);
+        lv_obj_t *bar = lv_obj_create(mn); lv_obj_remove_style_all(bar);
+        lv_obj_set_size(bar, 10, 2); lv_obj_center(bar); lv_obj_set_style_radius(bar, 1, 0);
+        lv_obj_set_style_bg_color(bar, TC(ON_ACCENT), 0); lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+        lv_obj_remove_flag(bar, LV_OBJ_FLAG_CLICKABLE);
+        ui_on(mn, zminus_cb, LV_EVENT_CLICKED, (void *)(intptr_t)(i + 1), "plview.zune.remove", UI_CORE);
+        x = 26;
+    } else {
+        lv_obj_add_flag(r, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(r, plv_song_cb, LV_EVENT_SHORT_CLICKED, (void*)(intptr_t)(i+1));
+        lv_obj_add_event_cb(r, plv_remove_cb, LV_EVENT_LONG_PRESSED, (void*)(intptr_t)(i+1));   /* hold to remove, as before */
+    }
+    const lv_font_t *f = zune_font(&font_zune_light_18);
+    lv_obj_t *t = lv_label_create(r); lv_label_set_text(t, g_pl_songs[i].title);
+    lv_label_set_long_mode(t, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(t, f, 0);
+    int now = g_znow_t[0] && !strcmp(g_pl_songs[i].title, g_znow_t) && !strcasecmp(g_pl_songs[i].artist, g_znow_a);
+    lv_obj_set_style_text_color(t, now ? TC(ACCENT_PRIMARY) : TC(TEXT_PRIMARY), 0);
+    lv_obj_set_pos(t, x, (30 - lv_font_get_line_height(f)) / 2); lv_obj_set_size(t, 240, lv_font_get_line_height(f));
+    lv_obj_set_user_data(t, (void *)(intptr_t)(x + 1));
+    ui_library_row(r);
+}
+void zplv_curve(void){                                               /* rows follow the round glass (as the Library's) */
+    if(!g_song_list) return;
+    uint32_t n = lv_obj_get_child_count(g_song_list);
+    for(uint32_t k = 0; k < n; k++){
+        lv_obj_t *r = lv_obj_get_child(g_song_list, k);
+        if(!lv_obj_has_flag(r, LV_OBJ_FLAG_USER_1)) continue;
+        lv_area_t a; lv_obj_get_coords(r, &a);
+        if(a.y2 < -40 || a.y1 > 400) continue;
+        int d = abs((a.y1 + a.y2) / 2 - 180); if(d > 178) d = 178;
+        int in = 180 - (int)sqrtf((float)(32400 - d * d)), x = in + 40, w = 360 - in - 24 - x; if(w < 90) w = 90;
+        lv_obj_set_style_translate_x(r, x, 0); lv_obj_set_width(r, w);
+        lv_obj_t *t = NULL; for(uint32_t c = 0; c < lv_obj_get_child_count(r); c++){ lv_obj_t *o = lv_obj_get_child(r, c); if(lv_obj_check_type(o, &lv_label_class)) t = o; }
+        if(t){ int lw = w - (int)(intptr_t)lv_obj_get_user_data(t) + 1; if(lw < 40) lw = 40; if(lv_obj_get_width(t) != lw) lv_obj_set_width(t, lw); }
+    }
+}
+static void zplv_create(lv_obj_t *root){
+    g_song_list = lv_obj_create(root);
+    lv_obj_remove_style_all(g_song_list);
+    lv_obj_set_pos(g_song_list, 0, 0); lv_obj_set_size(g_song_list, 360, 360);
+    lv_obj_set_style_pad_bottom(g_song_list, 76, 0); lv_obj_set_style_pad_row(g_song_list, 4, 0);
+    lv_obj_set_flex_flow(g_song_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(g_song_list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_scroll_dir(g_song_list, LV_DIR_VER); lv_obj_set_scrollbar_mode(g_song_list, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_add_flag(g_song_list, LV_OBJ_FLAG_SCROLL_MOMENTUM);
+    ui_library_list_watch(g_song_list);
+    lv_obj_add_event_cb(g_song_list, plv_scroll_cb, LV_EVENT_SCROLL, NULL);
+    lv_obj_t *f = lv_obj_create(root); lv_obj_remove_style_all(f); kit_keep(f);   /* the bottom fade */
+    lv_obj_set_size(f, 360, 76); lv_obj_align(f, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_color(f, TC(CANVAS), 0); lv_obj_set_style_bg_grad_color(f, TC(CANVAS), 0);
+    lv_obj_set_style_bg_grad_dir(f, LV_GRAD_DIR_VER, 0); lv_obj_set_style_bg_opa(f, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_main_opa(f, LV_OPA_TRANSP, 0); lv_obj_set_style_bg_grad_opa(f, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_grad_stop(f, 230, 0);
+    lv_obj_remove_flag(f, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    zune_status(root, SCR_PLVIEW);
+}
+void zplv_reset(void){ g_zedit = 0; g_zplv_keep_y = 0; }

@@ -16,12 +16,15 @@
 #include "azjump.h"
 #include "null_theme.h"
 #include "ipc.h"
+#include "zune_dial.h"
+#include "zune_thumbs.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <time.h>
 #include "config.h"
 #include "i18n.h"
 
@@ -29,7 +32,8 @@ enum { VIEW_MENU, VIEW_SONGS, VIEW_ALBUMS, VIEW_ARTISTS, VIEW_PLAYLISTS, VIEW_FA
 #define CAT_FOLDERS 1000   /* menu sentinel: opens the folder browser (a screen, not a library view) */
 #define CAT_BOOKS   1001   /* menu sentinel: opens the Books (audiobook) screen */
 
-#define ROW_H (th_null()?60:52)                     /* 1.4.1: packed tighter, with larger text (see lib_font) */
+static int lib_row_h(void);
+#define ROW_H lib_row_h()                           /* 1.4.1: 52, packed tighter, with larger text (see lib_font); Zune: per view */
 #define LIST_Y 70
 #define LIST_H 252
 
@@ -56,6 +60,28 @@ static char g_artist[MDB_STR];   /* artist whose albums VIEW_ARTIST_ALBUMS lists
 static char g_focus_artist[MDB_STR];  /* one-shot: highlight this artist when going back to Artists */
 static int  g_from_artist = 0;   /* the current VIEW_GROUP drill was opened from that artist's album list */
 static library_song_click_cb_t g_song_cb;
+
+/* ---- Zune (Figma, Library page): state ---- */
+LV_FONT_DECLARE(font_zune_light_18) LV_FONT_DECLARE(font_zune_light_21) LV_FONT_DECLARE(font_zune_light_24)
+LV_FONT_DECLARE(font_zune_light_50) LV_FONT_DECLARE(font_zune_regular_13) LV_FONT_DECLARE(font_zune_regular_14)
+LV_FONT_DECLARE(font_zune_regular_15) LV_FONT_DECLARE(font_zune_regular_19) LV_FONT_DECLARE(font_zune_semibold_11)
+LV_FONT_DECLARE(font_zune_semibold_22)
+static lv_obj_t *g_zpiv, *g_znext, *g_zmusic, *g_zmenu, *g_zfade[2], *g_zarc;
+static int g_znow_id;                  /* the playing song (its row in the accent) */
+static int g_zmenu_focus = 1;          /* the Music dial opens on the category used last ("albums" at first, as in Figma) */
+static int *g_zrep, *g_zac, *g_zsc;    /* album tile covers (a song per album); artist album / song counts (-1 = not yet) */
+static int g_znalb;                    /* albums on the tile wall (rows hold three) */
+static int lib_zalbum(void){ return g_view==VIEW_GROUP && (g_drill_kind==1 || g_scope_lvl==2); }   /* one album's songs */
+static int lib_row_h(void){
+    if(!th_zune()) return th_null()?60:52;
+    if(g_view==VIEW_ALBUMS) return 98;                      /* a row of three 96 px tiles: 102 px pitch */
+    if(lib_zalbum()) return 30;                             /* compact track rows under the album header */
+    return 54;
+}
+static void zrow_two(lv_obj_t *r, const char *top, const char *sub, const char *right, int now);
+static void zcurve_rows(void);
+static void zscroll_update(void);
+static const char *zlow(const char *t);
 
 /* All per-row buffers are dynamically sized to the library song count (g_alloc_n),
  * so there is NO fixed song/group cap - every view (songs, albums≤N, artists≤N,
@@ -105,7 +131,7 @@ static void position_key(char *out){
         strlen(drill),drill,strlen(artist),artist,strlen(album),album);
 }
 static void position_tick(void){
-    if(g_restoring || !g_position || g_count < 12) return;
+    if(g_restoring || !g_position || g_count < 12 || th_zune()) return;
     int idx=(lv_obj_get_scroll_y(g_list)-g_hdr_extra_px)/(ROW_H+4)-g_has_header;
     if(idx<0)idx=0; if(idx>=g_count)idx=g_count-1;
     char b[32]; snprintf(b,sizeof b,"%d / %d",idx+1,g_count);
@@ -166,6 +192,7 @@ static void lean_free_edge(int y1, int y2, int *w, int *shift){
 }
 static void curve_rows(void){
     if(!g_list) return;
+    if(th_zune()){ zcurve_rows(); return; }
     if(th_braun()){                                                  /* Braun: straight rows, restyled */
         for(uint32_t i = 0; i < lv_obj_get_child_count(g_list); i++){
             lv_obj_t *r = lv_obj_get_child(g_list, i);
@@ -211,6 +238,7 @@ static lv_obj_t *g_pdot[N_PDOTS];
 static int g_pdot_cur = -2;
 static void pdots_update(void){
     if(th_braun()) return;                                           /* Braun: no position dots */
+    if(th_zune()){ zscroll_update(); return; }                       /* Zune: a short arc on the rim + the letter dot */
     if(!g_pdot[0] || !g_list) return;
     lv_obj_update_layout(g_list);
     int32_t sy = lv_obj_get_scroll_y(g_list), sb = lv_obj_get_scroll_bottom(g_list), tot = sy + sb;
@@ -256,7 +284,7 @@ static void curve_scroll_cb(lv_event_t *e){ (void)e; virt_follow(); curve_rows()
 static lv_obj_t *base_row(void){
     lv_obj_t *r = lv_obj_create(g_list);
     lv_obj_remove_style_all(r);
-    lv_obj_set_size(r, 268, ROW_H);
+    lv_obj_set_size(r, th_zune() ? 300 : 268, ROW_H);
     lv_obj_add_flag(r, LV_OBJ_FLAG_USER_1);                         /* eligible for the curve */
     lv_obj_set_style_radius(r, 10, 0);
     lv_obj_set_style_bg_color(r, TC(SURFACE), LV_STATE_PRESSED);
@@ -269,6 +297,7 @@ static lv_obj_t *base_row(void){
  * 1.4.0 at every size). Montserrat -> Inter -> international -> CJK, like all user text. */
 static const lv_font_t *lib_font(int small_px){ return th_null()?theme_font(small_px>=18?THEME_FONT_USER_20:THEME_FONT_USER_18):ui_font_cjk(small_px + 2 * theme_font_size()); }
 static void row_two(lv_obj_t *r, const char *top, const char *sub, const char *right){
+    if(th_zune()){ zrow_two(r, top, sub, right, 0); return; }
     const lv_font_t *ft = lib_font(18), *fs = lib_font(16);
     int h1 = lv_font_get_line_height(ft), h2 = lv_font_get_line_height(fs), two = sub && sub[0];
     int y1 = (ROW_H - (two ? h1 + h2 : h1)) / 2; if(y1 < 0) y1 = 0;
@@ -472,14 +501,17 @@ static void group_play_cb(lv_event_t *e){
     if(gi < 0 || gi >= g_count) return;
     group_menu_open(gi, 0);
 }
-static void menu_cb(lv_event_t *e){
-    if(lv_event_get_code(e)!=LV_EVENT_CLICKED) return;
-    int v=(int)(uintptr_t)lv_event_get_user_data(e);
+static void menu_go(int v){
+    if(th_zune() && v==VIEW_HISTORY) v = VIEW_RECENT;    /* Zune (Figma 30): history is the recently played list itself */
     if(v==CAT_FOLDERS){ folderbrowser_open(); return; }   /* opens a screen, not a library view */
     if(v==CAT_BOOKS){ books_open(); return; }             /* audiobooks: a screen, not a library view */
     if(v==VIEW_ALBUMS && simple_cfg_get_int("album_view", 0)==1){ screen_show(SCR_ALBUMWALL); return; }  /* cover flow */
     g_view=v;
     g_drill_kind=0; library_reload();
+}
+static void menu_cb(lv_event_t *e){
+    if(lv_event_get_code(e)!=LV_EVENT_CLICKED) return;
+    menu_go((int)(uintptr_t)lv_event_get_user_data(e));
 }
 /* Back to Artists lands on the artist you came from (else the one playing), focused - not the top of the list */
 static void back_to_artists(void){
@@ -516,6 +548,8 @@ int library_back(void){                    /* the back SWIPE (and any caller tha
         if(g_deeplink){ g_deeplink=0; g_view=VIEW_MENU; library_reload(); return 0; }   /* opened from the hub */
         back_to_artists(); return 1;
     }
+    if(th_zune() && g_view==VIEW_MOSTPLAYED){ g_view=VIEW_RECENT; library_reload(); return 1; }   /* Zune: most played -> history */
+    if(th_zune() && g_view==VIEW_RECENT){ g_view=VIEW_MENU; library_reload(); return 1; }
     if(g_view==VIEW_MOSTPLAYED || g_view==VIEW_RECENT){ g_view=VIEW_HISTORY; library_reload(); return 1; }  /* stats -> History */
     if(g_view==VIEW_FAVS && g_deeplink){ g_deeplink=0; g_view=VIEW_MENU; library_reload(); return 0; }
     if(g_view!=VIEW_MENU){ g_view=VIEW_MENU; library_reload(); return 1; }
@@ -625,6 +659,9 @@ static void focus_scroll_begin(lv_event_t*e){
     /* Keep g_np_jump: the back gesture must still return to Music. */
 }
 static void focus_mark(lv_obj_t *r){   /* lifted row + accent title: "you are here" */
+    if(th_zune()){ lv_obj_t *t = lv_obj_get_child(r, 0);            /* Zune: the title in the accent, nothing lifted */
+        if(t && lv_obj_check_type(t, &lv_label_class)) lv_obj_set_style_text_color(t, TC(ACCENT_PRIMARY), 0);
+        g_focus_row = r; return; }
     lv_obj_set_style_bg_color(r, TC(SURFACE_SELECTED), 0);
     lv_obj_set_style_bg_opa(r, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(r, 14, 0);
@@ -638,7 +675,8 @@ static void focus_mark(lv_obj_t *r){   /* lifted row + accent title: "you are he
 /* ---- Picking several items (multi-select, multipick.c): tracks, albums and artists ------------------------------ */
 static int lib_pick_ok(void){
     switch(g_view){
-        case VIEW_SONGS: case VIEW_ALBUMS: case VIEW_ARTISTS: return 1;
+        case VIEW_SONGS: case VIEW_ARTISTS: return 1;
+        case VIEW_ALBUMS: return !th_zune();                         /* Zune: tiles, three to a row */
         case VIEW_GROUP: return !(g_drill_kind != 1 && g_scope_lvl == 1);   /* an album's / artist's songs, not a scope's albums */
         default: return 0;
     }
@@ -699,10 +737,14 @@ static void lib_pick_az(int show){ az_show(show ? g_count >= 20 : 0); }
 static void sel_exit(void){ mp_exit(&g_mp); }
 int library_picking(void){ return mp_active(&g_mp); }
 void library_pick_demo(const char *csv){ mp_demo(&g_mp, csv); }
+static lv_obj_t *base_row(void);
+static void zadd_row(lv_obj_t *r, int i);
+static int  zrow_special(int i);
 static void add_row(int i){
     int focus_me = (i == g_focus_idx);
     char dur[12];
     lv_obj_t *r = base_row();
+    if(th_zune() && zrow_special(i)){ zadd_row(r, i); if(focus_me) focus_mark(r); return; }
     if(lib_pick_ok()) mp_row(&g_mp, r, i);                          /* swipe to pick (runs before the row's own tap/hold) */
     if(g_view==VIEW_GROUP && g_drill_kind!=1 && g_scope_lvl==1){       /* artist/genre -> albums: "All Songs" first */
         char cnt[12];
@@ -886,12 +928,14 @@ static void jump_to_letter(char L){
     /* row pitch = ROW_H + the list's 4px flex pad_row, so idx*ROW_H alone lands
      * progressively short for later letters. */
     if(g_virt){ virt_window(idx - VIRT_AHEAD, idx + LIST_H / PITCH + 1 + VIRT_AHEAD); lv_obj_update_layout(g_list); }
+    if(th_zune() && g_view==VIEW_ALBUMS){ idx /= 3; if(g_virt){ virt_window(idx - VIRT_AHEAD, idx + LIST_H / PITCH + 1 + VIRT_AHEAD); lv_obj_update_layout(g_list); } }
     lv_obj_scroll_to_y(g_list, g_hdr_extra_px + (idx + g_has_header)*(ROW_H+4), LV_ANIM_OFF);
     curve_rows(); pdots_update();
 }
 static void az_show(int on){
     azjump_show(&g_az, on);
     if(on)pdots_update();
+    if(th_zune()){ if(g_list){ lv_obj_update_layout(g_list); curve_rows(); } return; }   /* the rows stop short of the letter dot */
     /* fork: the list always sits on the centre line, rows centred, so the curve narrows them evenly on both sides
      * (as History and the folder browser do); the A-Z button sits just outside the widest row on the right rim */
     if(g_list){
@@ -902,6 +946,13 @@ static void az_show(int on){
 
 /* ---- populate ----------------------------------------------------------- */
 static lv_obj_t *empty_label(const char *txt){
+    if(th_zune()){                                              /* Figma 35: one big statement, a line of help */
+        const char *help = NULL;
+        if(strstr(txt, "avourite")) help = "hold any song and choose favourite.";
+        else if(strstr(txt, "played")) help = "songs you play show up here, newest first.";
+        zune_empty(g_list, strstr(txt, "found") ? "nothing here yet" : txt, help);
+        return NULL;
+    }
     lv_obj_t *l = lv_label_create(g_list);
     lv_label_set_text(l, txt);
     lv_obj_set_style_text_font(l, TF(UI_16), 0);
@@ -916,6 +967,15 @@ static void scan_action_cb(lv_event_t *e){
     ui_rescan_library();
 }
 static void empty_scan(const char *txt){
+    if(th_zune()){
+        zune_empty(g_list, "nothing here yet", "the library fills from your card. scan it to look for music.");
+        LV_FONT_DECLARE(font_zune_regular_17)
+        lv_obj_t *l = lv_label_create(g_list); kit_keep(l); lv_label_set_text(l, "scan library");
+        lv_obj_set_style_text_font(l, zune_font(&font_zune_regular_17), 0); lv_obj_set_style_text_color(l, TC(ACCENT_PRIMARY), 0);
+        lv_obj_set_style_margin_top(l, 14, 0); lv_obj_add_flag(l, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_ext_click_area(l, 14);
+        lv_obj_add_event_cb(l, scan_action_cb, LV_EVENT_CLICKED, NULL);
+        return;
+    }
     empty_label(txt);
     lv_obj_t *b = lv_button_create(g_list);
     lv_obj_remove_style_all(b);
@@ -1112,6 +1172,582 @@ static void add_plist_row(int centered){
     g_has_header = 2;                            /* Play All / Shuffle + this row */
 }
 
+/* ==== Zune (Figma, Library page: 29:53 music dial, 29:67 songs, 29:93 album wall, 8:223 album, 29:139 artists,
+ * 33:41 artist) ===================================================================================================
+ * Text on black, no boxes: a pivot title on top, rows that follow the round glass, the playing song in the accent,
+ * a magenta dot with the current letter on the right rim (the A-Z jump), a short arc on the rim for the position. */
+static const char *zlow(const char *t){           /* UI words in lower case (the Zune voice); names are left alone */
+    static char b[4][96]; static int k; char *o = b[k++ & 3];
+    snprintf(o, sizeof b[0], "%s", t ? t : "");
+    for(char *c = o; *c; c++) if(*c >= 'A' && *c <= 'Z') *c += 32;
+    return o;
+}
+static lv_obj_t *zlabel(lv_obj_t *p, const char *t, const lv_font_t *f, lv_color_t c, int x, int y, int reserve){
+    lv_obj_t *l = lv_label_create(p);
+    lv_label_set_text(l, t ? t : ""); lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(l, f, 0); lv_obj_set_style_text_color(l, c, 0);
+    lv_obj_set_pos(l, x, y); lv_obj_set_size(l, 200, lv_font_get_line_height(f));
+    if(reserve >= 0) lv_obj_set_user_data(l, (void *)(intptr_t)(reserve + 1));   /* the curve fits it: row width - x - reserve */
+    lv_obj_remove_flag(l, LV_OBJ_FLAG_CLICKABLE);
+    return l;
+}
+/* title (Light 21; the playing song Regular 19 in the accent), a grey line under it, an optional grey value at the right */
+static void zrow_two(lv_obj_t *r, const char *top, const char *sub, const char *right, int now){
+    const lv_font_t *ft = zune_font(now ? &font_zune_regular_19 : &font_zune_light_21), *fs = zune_font(&font_zune_regular_13);
+    int two = sub && sub[0], h1 = lv_font_get_line_height(ft), rw = 0;
+    if(right && right[0]){ lv_point_t sz; lv_text_get_size(&sz, right, fs, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE); rw = sz.x + 12; }
+    int y1 = two ? 3 : (ROW_H - h1) / 2;
+    zlabel(r, top, ft, now ? TC(ACCENT_PRIMARY) : TC(TEXT_PRIMARY), 0, y1, rw);
+    if(two) zlabel(r, sub, fs, TC(TEXT_MUTED), 1, y1 + h1 - 4, rw);
+    if(rw){ lv_obj_t *l = lv_label_create(r); lv_label_set_text(l, right);
+            lv_obj_set_style_text_font(l, fs, 0); lv_obj_set_style_text_color(l, TC(TEXT_MUTED), 0);
+            lv_obj_align(l, LV_ALIGN_RIGHT_MID, 0, 0); }
+    ui_library_row(r);
+}
+/* every list row starts on the bezel curve (Figma: x = the circle's edge at the row + 40) and stops short of the
+ * other side (and of the letter dot); the labels narrow with it */
+static void zcurve_rows(void){
+    uint32_t n = lv_obj_get_child_count(g_list);
+    int azon = g_az.btn && !lv_obj_has_flag(g_az.btn, LV_OBJ_FLAG_HIDDEN);
+    for(uint32_t i = 0; i < n; i++){
+        lv_obj_t *r = lv_obj_get_child(g_list, i);
+        if(!lv_obj_has_flag(r, LV_OBJ_FLAG_USER_1)) continue;
+        lv_area_t a; lv_obj_get_coords(r, &a);
+        if(a.y2 < -40 || a.y1 > 400) continue;
+        int d = abs((a.y1 + a.y2) / 2 - 180); if(d > 178) d = 178;
+        int in = 180 - (int)sqrtf((float)(32400 - d * d));
+        int x = in + 40, right = 360 - in - 24;
+        if(azon && right > 296) right = 296;
+        int w = right - x; if(w < 90) w = 90;
+        intptr_t key = ((intptr_t)w << 16 | (unsigned)x) + 1;               /* (w carries the letter dot's limit too) */
+        if((intptr_t)lv_obj_get_user_data(r) == key) continue;
+        lv_obj_set_user_data(r, (void *)key);
+        lv_obj_set_style_translate_x(r, x, 0); lv_obj_set_width(r, w);
+        for(uint32_t k = 0; k < lv_obj_get_child_count(r); k++){
+            lv_obj_t *c = lv_obj_get_child(r, k);
+            intptr_t ud = (intptr_t)lv_obj_get_user_data(c);
+            if(ud <= 0 || !lv_obj_check_type(c, &lv_label_class)) continue;
+            int lw = w - lv_obj_get_x(c) - (int)(ud - 1); if(lw < 30) lw = 30;
+            if(lv_obj_get_width(c) != lw) lv_obj_set_width(c, lw);
+        }
+    }
+}
+static void zscroll_update(void){
+    if(!g_zarc || !g_list) return;
+    if(g_view == VIEW_MENU || lv_obj_has_flag(g_list, LV_OBJ_FLAG_HIDDEN)){ lv_obj_add_flag(g_zarc, LV_OBJ_FLAG_HIDDEN); return; }
+    lv_obj_update_layout(g_list);
+    int32_t sy = lv_obj_get_scroll_y(g_list), sb = lv_obj_get_scroll_bottom(g_list), tot = sy + sb;
+    if(tot <= 80) lv_obj_add_flag(g_zarc, LV_OBJ_FLAG_HIDDEN);   /* (the 70 px bottom pad alone is not a list to scroll) */
+    else {                                                   /* an 18 degree arc travelling down the right rim */
+        float f = (float)sy / tot; if(f < 0) f = 0; if(f > 1) f = 1;
+        int st = 300 + (int)(f * 102);
+        lv_arc_set_bg_angles(g_zarc, st % 360, (st + 18) % 360);
+        lv_obj_remove_flag(g_zarc, LV_OBJ_FLAG_HIDDEN);
+    }
+    zthumb_bump_visible();                                   /* the covers on screen load first */
+    if(g_count > 0 && g_first){
+        int row = (sy - g_hdr_extra_px) / PITCH; if(row < 0) row = 0;
+        int idx = g_view == VIEW_ALBUMS ? row * 3 : row; if(idx >= g_count) idx = g_count - 1;
+        azjump_letter(&g_az, g_first[idx]);
+        azjump_position(&g_az, g_first[idx], 322, 196);       /* the letter wheel setting: the same place */
+    }
+}
+static void zlinks_fit(lv_obj_t *r, const char *const *lb, const lv_event_cb_t *cb, const char *const *act, int n){
+    lv_obj_set_flex_flow(r, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(r, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(r, 20, 0);
+    for(int k = 0; k < n; k++){
+        lv_obj_t *o = lv_obj_create(r); lv_obj_remove_style_all(o); kit_keep(o);
+        lv_obj_set_size(o, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+        lv_obj_add_flag(o, LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_ext_click_area(o, 8);
+        lv_obj_set_style_opa(o, LV_OPA_50, LV_STATE_PRESSED);
+        lv_obj_t *l = lv_label_create(o); lv_label_set_text(l, lb[k]);
+        int quiet = lb[k][0] == '+';                          /* "+ playlist": the quieter extra */
+        lv_obj_set_style_text_font(l, quiet ? zune_font(&font_zune_regular_14) : zune_font(&font_zune_regular_15), 0);
+        lv_obj_set_style_text_color(l, quiet ? TC(TEXT_MUTED) : TC(ACCENT_PRIMARY), 0);
+        ui_on(o, cb[k], LV_EVENT_CLICKED, NULL, act[k], UI_CORE);
+    }
+}
+/* the links over a song list ("shuffle all"; "play all  shuffle  + playlist"): the first list child, it curves too */
+static void zlinks(const char *const *lb, const lv_event_cb_t *cb, const char *const *act, int n){
+    lv_obj_t *r = lv_obj_create(g_list); lv_obj_remove_style_all(r); kit_keep(r);
+    lv_obj_set_size(r, 300, 32); lv_obj_remove_flag(r, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(r, LV_OBJ_FLAG_USER_1);
+    zlinks_fit(r, lb, cb, act, n);
+    g_hdr_extra_px += 32 + 4;
+}
+static void play_all_cb(lv_event_t *e); static void shuffle_all_cb(lv_event_t *e); static void add_plist_cb(lv_event_t *e);
+static void zcover(lv_obj_t *parent, int x, int y, int size, int song_id, const char *name, int initial_only){
+    lv_obj_t *ph = lv_obj_create(parent); lv_obj_remove_style_all(ph); kit_keep(ph);
+    lv_obj_set_size(ph, size, size); lv_obj_set_pos(ph, x, y);
+    lv_obj_set_style_bg_color(ph, TC(SURFACE), 0); lv_obj_set_style_bg_opa(ph, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(ph, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    if(name && name[0]){                                      /* no art (yet): the name on a dark tile */
+        lv_obj_t *l = lv_label_create(ph);
+        if(initial_only){ char in[8] = {0}; unsigned char c0 = (unsigned char)name[0];
+            int len = c0 < 0x80 ? 1 : (c0 >> 5) == 6 ? 2 : (c0 >> 4) == 14 ? 3 : (c0 >> 3) == 30 ? 4 : 1;
+            for(int k = 0; k < len && name[k]; k++) in[k] = name[k];
+            lv_label_set_text(l, zlow(in)); lv_obj_set_style_text_font(l, zune_font(&font_zune_light_50), 0);
+            lv_obj_align(l, LV_ALIGN_CENTER, x < 0 ? -x / 2 : 0, 0); }
+        else { lv_label_set_text(l, name); lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+            lv_obj_set_width(l, size - 14); lv_obj_set_style_max_height(l, 2 * lv_font_get_line_height(zune_font(&font_zune_regular_13)), 0);
+            lv_obj_set_style_text_font(l, zune_font(&font_zune_regular_13), 0); lv_obj_align(l, LV_ALIGN_BOTTOM_LEFT, 7, -6); }
+        lv_obj_set_style_text_color(l, TC(TEXT_MUTED), 0);
+    }
+    lv_obj_t *img = lv_image_create(ph);
+    lv_obj_set_size(img, size, size); lv_obj_center(img);
+    if(size > 148) lv_image_set_scale(img, (uint32_t)(256 * size / 148));    /* the 148 px cache, enlarged */
+    lv_obj_add_flag(img, LV_OBJ_FLAG_HIDDEN);
+    zthumb_bind(img, song_id, size > 148 ? 148 : size);
+}
+/* album (Figma 8:223): the cover cut by the left rim, the title / artist / count beside it, play and shuffle in the
+ * accent; the tracks below, numbered */
+static void zalbum_header(const char *album, int n){
+    lv_obj_t *h = lv_obj_create(g_list); lv_obj_remove_style_all(h); kit_keep(h);
+    lv_obj_set_size(h, 360, 246); lv_obj_remove_flag(h, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    zcover(h, -46, 48, 192, n > 0 ? g_buf[0]->id : 0, album, 1);
+    const lv_font_t *ft = zune_font(&font_zune_semibold_22), *fa = zune_font(&font_zune_regular_14), *fm = zune_font(&font_zune_regular_13);
+    lv_point_t sz; lv_text_get_size(&sz, album, ft, 0, 0, 158, LV_TEXT_FLAG_NONE);
+    int lh = lv_font_get_line_height(ft), th = sz.y > lh ? 2 * lh : lh, y = 62;
+    lv_obj_t *t = lv_label_create(h); lv_label_set_text(t, album); lv_label_set_long_mode(t, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(t, ft, 0); lv_obj_set_style_text_color(t, TC(TEXT_PRIMARY), 0);
+    lv_obj_set_pos(t, 166, y); lv_obj_set_size(t, 158, th); y += th + 2;
+    const char *artist = n > 0 ? (g_buf[0]->artist_group[0] ? g_buf[0]->artist_group : g_buf[0]->artist) : "";
+    if(artist[0]){ lv_obj_t *a = lv_label_create(h); lv_label_set_text(a, artist); lv_label_set_long_mode(a, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_font(a, fa, 0); lv_obj_set_style_text_color(a, TC(TEXT_PRIMARY), 0);
+        lv_obj_set_pos(a, 166, y); lv_obj_set_size(a, 156, lv_font_get_line_height(fa)); y += lv_font_get_line_height(fa); }
+    long ms = 0; for(int i = 0; i < n; i++) ms += g_buf[i]->dur_ms > 0 ? g_buf[i]->dur_ms : 0;
+    int min = (int)((ms + 30000) / 60000); char meta[64], tm[24];
+    if(min >= 60) snprintf(tm, sizeof tm, "%dh %dm", min / 60, min % 60); else snprintf(tm, sizeof tm, "%dm", min);
+    snprintf(meta, sizeof meta, "%d song%s \xC2\xB7 %s", n, n == 1 ? "" : "s", tm);
+    lv_obj_t *m = lv_label_create(h); lv_label_set_text(m, meta);
+    lv_obj_set_style_text_font(m, fm, 0); lv_obj_set_style_text_color(m, TC(TEXT_MUTED), 0); lv_obj_set_pos(m, 166, y);
+    y += lv_font_get_line_height(fm) + 12; if(y < 146) y = 146;
+    static const char *const LB[] = { "play", "shuffle" }, *const LB2[] = { "+ playlist" };
+    static const char *const AC[] = { "library.play_all", "library.shuffle" }, *const AC2[] = { "library.add_plist" };
+    static const lv_event_cb_t CB[] = { play_all_cb, shuffle_all_cb }, CB2[] = { add_plist_cb };
+    lv_obj_t *lk = lv_obj_create(h); lv_obj_remove_style_all(lk); kit_keep(lk);
+    lv_obj_set_size(lk, 170, 28); lv_obj_set_pos(lk, 166, y); lv_obj_remove_flag(lk, LV_OBJ_FLAG_SCROLLABLE);
+    zlinks_fit(lk, LB, CB, AC, 2);
+    lv_obj_t *lk2 = lv_obj_create(h); lv_obj_remove_style_all(lk2); kit_keep(lk2);
+    lv_obj_set_size(lk2, 160, 26); lv_obj_set_pos(lk2, 166, y + 30); lv_obj_remove_flag(lk2, LV_OBJ_FLAG_SCROLLABLE);
+    zlinks_fit(lk2, LB2, CB2, AC2, 1);
+    g_hdr_extra_px = 246 + 4;
+}
+static void ztrack_row(lv_obj_t *r, int i){
+    const mdb_song_t *so = g_buf[i]; int now = so->id == g_znow_id;
+    const lv_font_t *ft = zune_font(&font_zune_light_18), *fs = zune_font(&font_zune_regular_13);
+    char num[8], dur[12]; snprintf(num, sizeof num, "%d", so->track > 0 ? so->track : i + 1); fmt_dur(dur, sizeof dur, so->dur_ms);
+    zlabel(r, so->title[0] ? so->title : "Untitled", ft, now ? TC(ACCENT_PRIMARY) : TC(TEXT_PRIMARY), 24, (ROW_H - lv_font_get_line_height(ft)) / 2, 50);
+    lv_obj_t *nl = lv_label_create(r); lv_label_set_text(nl, num);
+    lv_obj_set_style_text_font(nl, fs, 0); lv_obj_set_style_text_color(nl, now ? TC(ACCENT_PRIMARY) : TC(TEXT_MUTED), 0);
+    lv_obj_align(nl, LV_ALIGN_LEFT_MID, 0, 1);
+    if(dur[0]){ lv_obj_t *dl = lv_label_create(r); lv_label_set_text(dl, dur);
+        lv_obj_set_style_text_font(dl, fs, 0); lv_obj_set_style_text_color(dl, TC(TEXT_MUTED), 0); lv_obj_align(dl, LV_ALIGN_RIGHT_MID, 0, 1); }
+    ui_library_row(r);
+}
+static void zalbum_row(lv_obj_t *r, int i){                    /* the album wall (Figma 29:93): three 96 px tiles */
+    lv_obj_remove_flag(r, LV_OBJ_FLAG_USER_1 | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_width(r, 360); lv_obj_set_style_bg_opa(r, LV_OPA_TRANSP, LV_STATE_PRESSED);
+    for(int c = 0; c < 3; c++){
+        int gi = i * 3 + c; if(gi >= g_znalb) break;
+        lv_obj_t *t = lv_obj_create(r); lv_obj_remove_style_all(t); kit_keep(t);
+        lv_obj_set_size(t, 96, 96); lv_obj_set_pos(t, 30 + c * 102, 0);
+        lv_obj_add_flag(t, LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(t, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_opa(t, LV_OPA_70, LV_STATE_PRESSED);
+        zcover(t, 0, 0, 96, g_zrep ? g_zrep[gi] : 0, g_gnames[gi], 0);
+        ui_on(t, group_cb, LV_EVENT_SHORT_CLICKED, (void *)(uintptr_t)gi, "library.group", UI_CORE);
+        ui_on(t, group_play_cb, LV_EVENT_LONG_PRESSED, (void *)(uintptr_t)gi, "library.group_play.long", UI_CORE);
+    }
+}
+static void zartist_row(lv_obj_t *r, int i){                   /* artists (Figma 29:139): an initial in a circle */
+    if(g_zac && g_zsc && g_zac[i] < 0){
+        g_zsc[i] = mdb_artist_songs(g_gnames[i], g_buf, g_alloc_n);
+        g_zac[i] = mdb_scope_albums(MDB_SCOPE_ARTIST, g_gnames[i], NULL, NULL, NULL, 0);
+    }
+    char sub[64] = "";
+    if(g_zac && g_zsc && g_zac[i] >= 0){
+        int a = g_zac[i], n = g_zsc[i];
+        if(a > 0) snprintf(sub, sizeof sub, "%d album%s \xC2\xB7 %d song%s", a, a == 1 ? "" : "s", n, n == 1 ? "" : "s");
+        else snprintf(sub, sizeof sub, "%d song%s", n, n == 1 ? "" : "s");
+    }
+    const lv_font_t *ft = zune_font(&font_zune_light_21);
+    int h1 = lv_font_get_line_height(ft);
+    zlabel(r, g_gnames[i], ft, TC(TEXT_PRIMARY), 52, sub[0] ? 3 : (ROW_H - h1) / 2, 0);
+    if(sub[0]) zlabel(r, sub, zune_font(&font_zune_regular_13), TC(TEXT_MUTED), 53, 3 + h1 - 4, 0);
+    static const uint32_t CIRC[] = { 0x2F8F80, 0x6B5A86, 0x2B3B47, 0x7A2F3B, 0x8A6A2C, 0x355C8A };   /* quiet tile colours */
+    unsigned hsh = 5381; for(const char *p = g_gnames[i]; *p; p++) hsh = hsh * 33 + (unsigned char)*p;
+    lv_obj_t *c = lv_obj_create(r); lv_obj_remove_style_all(c); kit_keep(c);
+    lv_obj_set_size(c, 40, 40); lv_obj_align(c, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_radius(c, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(c, theme_color_from_rgb(CIRC[hsh % 6]), 0); lv_obj_set_style_bg_opa(c, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(c, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    char in[8] = {0}; unsigned char c0 = (unsigned char)g_gnames[i][0];
+    int len = c0 < 0x80 ? 1 : (c0 >> 5) == 6 ? 2 : (c0 >> 4) == 14 ? 3 : (c0 >> 3) == 30 ? 4 : 1;
+    for(int k = 0; k < len && g_gnames[i][k]; k++) in[k] = g_gnames[i][k];
+    lv_obj_t *l = lv_label_create(c); lv_label_set_text(l, in[0] ? zlow(in) : "?");
+    lv_obj_set_style_text_font(l, ft, 0); lv_obj_set_style_text_color(l, TC(TEXT_PRIMARY), 0);
+    lv_obj_align(l, LV_ALIGN_CENTER, 0, -2);
+    ui_library_row(r);
+}
+static int zrow_special(int i){
+    (void)i;
+    switch(g_view){
+        case VIEW_ALBUMS: case VIEW_ARTISTS: case VIEW_FAVS: case VIEW_MOSTPLAYED: case VIEW_RECENT: case VIEW_SONGS: case VIEW_GENRES: return 1;
+        case VIEW_GROUP: return !(g_drill_kind != 1 && g_scope_lvl == 1);       /* not an artist's / genre's album list */
+        default: return 0;
+    }
+}
+static void zhistory_row(lv_obj_t *r, int i);
+static void zsel_mark_cb(lv_event_t *e);
+static void zadd_row(lv_obj_t *r, int i){
+    if(lib_pick_ok()) mp_row(&g_mp, r, i);
+    lv_obj_add_event_cb(r, zsel_mark_cb, LV_EVENT_LONG_PRESSED, (void *)(intptr_t)i);   /* before the hold menu opens */
+    switch(g_view){
+        case VIEW_ALBUMS: zalbum_row(r, i); return;
+        case VIEW_ARTISTS:
+            ui_on(r, group_cb, LV_EVENT_SHORT_CLICKED, (void*)(uintptr_t)i, "library.group", UI_CORE);
+            ui_on(r, group_play_cb, LV_EVENT_LONG_PRESSED, (void*)(uintptr_t)i, "library.group_play.long", UI_CORE);
+            zartist_row(r, i); return;
+        case VIEW_FAVS:
+            ui_on(r, fav_row_cb, LV_EVENT_SHORT_CLICKED, (void*)(uintptr_t)i, "library.fav_row", UI_CORE);
+            ui_on(r, fav_row_cb, LV_EVENT_LONG_PRESSED, (void*)(uintptr_t)i, "library.fav_row.long", UI_CORE);
+            zrow_two(r, g_favs[i].title, g_favs[i].artist, NULL, g_favs[i].id == g_znow_id);
+            for(int k = 0; k < 2; k++){ lv_obj_t *c = lv_obj_get_child(r, k); if(c) lv_obj_set_user_data(c, (void *)(intptr_t)(24 + 1)); }
+            { lv_obj_t *hl = lv_label_create(r); lv_label_set_text(hl, TH_IC_HEART);     /* Figma 27: a small magenta heart */
+              lv_obj_set_style_text_font(hl, &font_theme_20, 0); lv_obj_set_style_text_color(hl, TC(ACCENT_PRIMARY), 0);
+              lv_obj_set_style_transform_pivot_x(hl, LV_PCT(50), 0); lv_obj_set_style_transform_pivot_y(hl, LV_PCT(50), 0);
+              lv_obj_set_style_transform_scale(hl, 128, 0); lv_obj_align(hl, LV_ALIGN_RIGHT_MID, -2, 0); }
+            return;
+        case VIEW_MOSTPLAYED: case VIEW_RECENT:
+            ui_on(r, song_cb, LV_EVENT_SHORT_CLICKED, (void*)(uintptr_t)g_favs[i].id,"library.history.song",UI_CORE);
+            ui_on(r, song_long_cb, LV_EVENT_LONG_PRESSED, (void*)(uintptr_t)g_favs[i].id,"library.history.song.long",UI_CORE);
+            zhistory_row(r, i); return;
+        case VIEW_GENRES: {                                      /* Figma 24: the genre, its album count under it */
+            ui_on(r, group_cb, LV_EVENT_SHORT_CLICKED, (void*)(uintptr_t)i, "library.group", UI_CORE);
+            ui_on(r, group_play_cb, LV_EVENT_LONG_PRESSED, (void*)(uintptr_t)i, "library.group_play.long", UI_CORE);
+            if(g_zac && g_zac[i] < 0) g_zac[i] = mdb_scope_albums(MDB_SCOPE_GENRE, g_gnames[i], NULL, NULL, NULL, 0);
+            char sub[48]; int a = g_zac ? g_zac[i] : 0;
+            if(a > 0) snprintf(sub, sizeof sub, "%d album%s", a, a == 1 ? "" : "s");
+            else snprintf(sub, sizeof sub, "%d song%s", g_gcounts[i], g_gcounts[i] == 1 ? "" : "s");
+            zrow_two(r, g_gnames[i], sub, NULL, 0); return; }
+        default:                                                 /* songs: all of them, or a drill's */
+            if(g_view==VIEW_GROUP && g_drill_kind!=1 && g_scope_lvl==2)
+                ui_on(r, scope_song_cb, LV_EVENT_SHORT_CLICKED, (void*)(uintptr_t)g_buf[i]->id, "library.scope_song", UI_CORE);
+            else
+                ui_on(r, song_cb, LV_EVENT_SHORT_CLICKED, (void*)(uintptr_t)g_buf[i]->id, "library.song", UI_CORE);
+            ui_on(r, song_long_cb, LV_EVENT_LONG_PRESSED, (void*)(uintptr_t)g_buf[i]->id, "library.song.long", UI_CORE);
+            if(lib_zalbum()) ztrack_row(r, i);
+            else zrow_two(r, g_buf[i]->title[0] ? g_buf[i]->title : "Untitled", g_buf[i]->artist, NULL, g_buf[i]->id == g_znow_id);
+    }
+}
+/* an artist (Figma 33:41) or a genre (Figma 70): the count, play all / shuffle, its albums as a row of covers,
+ * "all songs". names[k] / reps[k] for k in [k0, k1); a tile tap sends tile_cb with k (SHORT_CLICKED), a hold long_cb. */
+static void zstrip_page(const char *meta, char (*names)[MDB_STR], const int *reps, int k0, int k1,
+                        lv_event_cb_t tile_cb, lv_event_cb_t long_cb, int ud_off, lv_event_cb_t all_cb, intptr_t all_ud){
+    lv_obj_t *h = lv_obj_create(g_list); lv_obj_remove_style_all(h); kit_keep(h);
+    lv_obj_set_size(h, 360, 236); lv_obj_remove_flag(h, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_t *m = lv_label_create(h); lv_label_set_text(m, meta);
+    lv_obj_set_style_text_font(m, zune_font(&font_zune_regular_14), 0); lv_obj_set_style_text_color(m, TC(TEXT_MUTED), 0);
+    lv_obj_set_pos(m, 48, 4);
+    static const char *const LB[] = { "play all", "shuffle" }, *const AC[] = { "library.play_all", "library.shuffle" };
+    static const lv_event_cb_t CB[] = { play_all_cb, shuffle_all_cb };
+    lv_obj_t *lk = lv_obj_create(h); lv_obj_remove_style_all(lk); kit_keep(lk);
+    lv_obj_set_size(lk, 260, 28); lv_obj_set_pos(lk, 48, 26); lv_obj_remove_flag(lk, LV_OBJ_FLAG_SCROLLABLE);
+    zlinks_fit(lk, LB, CB, AC, 2);
+    lv_obj_t *st = lv_obj_create(h); lv_obj_remove_style_all(st); kit_keep(st);   /* the albums, sideways */
+    lv_obj_set_size(st, 360, 124); lv_obj_set_pos(st, 0, 64);
+    lv_obj_set_flex_flow(st, LV_FLEX_FLOW_ROW); lv_obj_set_style_pad_column(st, 12, 0);
+    lv_obj_set_style_pad_left(st, 38, 0); lv_obj_set_style_pad_right(st, 38, 0);
+    lv_obj_set_scroll_dir(st, LV_DIR_HOR); lv_obj_set_scrollbar_mode(st, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_add_flag(st, LV_OBJ_FLAG_SCROLL_MOMENTUM);
+    for(int k = k0; k < k1; k++){
+        lv_obj_t *t = lv_obj_create(st); lv_obj_remove_style_all(t); kit_keep(t);
+        lv_obj_set_size(t, 100, 124); lv_obj_add_flag(t, LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(t, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_opa(t, LV_OPA_70, LV_STATE_PRESSED);
+        zcover(t, 0, 0, 100, reps ? reps[k] : 0, NULL, 0);
+        lv_obj_t *l = lv_label_create(t); lv_label_set_text(l, names[k]); lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+        lv_obj_set_size(l, 100, lv_font_get_line_height(zune_font(&font_zune_regular_13))); lv_obj_set_pos(l, 0, 105);
+        lv_obj_set_style_text_font(l, zune_font(&font_zune_regular_13), 0); lv_obj_set_style_text_color(l, TC(TEXT_PRIMARY), 0);
+        ui_on(t, tile_cb, LV_EVENT_SHORT_CLICKED, (void *)(uintptr_t)(k + ud_off), "library.group", UI_CORE);
+        ui_on(t, long_cb, LV_EVENT_LONG_PRESSED, (void *)(uintptr_t)(k + ud_off), "library.group_play.long", UI_CORE);
+    }
+    lv_obj_t *al = lv_obj_create(h); lv_obj_remove_style_all(al); kit_keep(al);
+    lv_obj_set_size(al, LV_SIZE_CONTENT, LV_SIZE_CONTENT); lv_obj_set_pos(al, 96, 192);
+    lv_obj_add_flag(al, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_ext_click_area(al, 10); lv_obj_set_style_opa(al, LV_OPA_50, LV_STATE_PRESSED);
+    lv_obj_t *l = lv_label_create(al); lv_label_set_text(l, "all songs");
+    lv_obj_set_style_text_font(l, zune_font(&font_zune_light_24), 0); lv_obj_set_style_text_color(l, TC(TEXT_PRIMARY), 0);
+    ui_on(al, all_cb, LV_EVENT_SHORT_CLICKED, (void *)all_ud, "library.scope_all", UI_CORE);
+}
+static void zartist_page(int n){                        /* g_gnames[0] = All Songs, then the artist's albums */
+    char meta[64]; int a = n - 1, s = g_gcounts[0];
+    snprintf(meta, sizeof meta, "%d album%s \xC2\xB7 %d song%s", a, a == 1 ? "" : "s", s, s == 1 ? "" : "s");
+    int *rep = calloc((size_t)n, sizeof *rep);
+    if(rep) for(int k = 1; k < n; k++)
+        for(int j = 0; j < g_gcounts[0] && j < g_alloc_n; j++) if(!strcasecmp(g_buf[j]->album, g_gnames[k])){ rep[k] = g_buf[j]->id; break; }
+    zstrip_page(meta, g_gnames, rep, 1, n, group_cb, group_play_cb, 0, group_cb, 0);
+    free(rep);
+}
+static void zscope_page(int n){                         /* a genre's (or an artist's) albums: g_gnames[0..n) */
+    char meta[64];
+    snprintf(meta, sizeof meta, "%d album%s \xC2\xB7 %d song%s", n, n == 1 ? "" : "s", g_scope_total, g_scope_total == 1 ? "" : "s");
+    int *rep = calloc((size_t)n, sizeof *rep);
+    if(rep) for(int k = 0; k < n; k++){ const mdb_song_t *one[1];
+        if(mdb_scope_album_songs(scope_kind(), g_drill, g_gnames[k], one, 1) > 0) rep[k] = one[0]->id; }
+    zstrip_page(meta, g_gnames, rep, 0, n, scope_album_cb, scope_album_play_cb, 0, scope_all_cb, 0);
+    free(rep);
+}
+static void zmost_cb(lv_event_t *e){ if(lv_event_get_code(e) == LV_EVENT_CLICKED) menu_go(VIEW_MOSTPLAYED); }
+/* playlists (Figma 25): "new playlist" in a ring, then each with a 2 x 2 mosaic and its count + length */
+static void zlen(char *b, size_t n, long ms){
+    int min = (int)((ms + 30000) / 60000);
+    if(min >= 60) snprintf(b, n, "%dh %dm", min / 60, min % 60); else snprintf(b, n, "%dm", min);
+}
+static void zplaylist_new_row(lv_obj_t *r){
+    lv_obj_t *ring = lv_obj_create(r); lv_obj_remove_style_all(ring); kit_keep(ring);
+    lv_obj_set_size(ring, 40, 40); lv_obj_align(ring, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_radius(ring, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(ring, 2, 0); lv_obj_set_style_border_color(ring, TC(ACCENT_PRIMARY), 0);
+    lv_obj_remove_flag(ring, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *p = lv_label_create(ring); lv_label_set_text(p, "+");
+    lv_obj_set_style_text_font(p, zune_font(&font_zune_light_24), 0); lv_obj_set_style_text_color(p, TC(ACCENT_PRIMARY), 0);
+    lv_obj_align(p, LV_ALIGN_CENTER, 0, -2);
+    const lv_font_t *ft = zune_font(&font_zune_light_21);
+    zlabel(r, "new playlist", ft, TC(ACCENT_PRIMARY), 52, (ROW_H - lv_font_get_line_height(ft)) / 2, 0);
+}
+static void zplaylist_row(lv_obj_t *r, int i){
+    int ids[4], ni = 0; long ms = 0;
+    int n = zthumb_playlist(g_plids[i], ids, &ni, &ms);
+    char sub[64], len[24]; zlen(len, sizeof len, ms);
+    if(n > 0) snprintf(sub, sizeof sub, "%d song%s \xC2\xB7 %s", n, n == 1 ? "" : "s", len); else snprintf(sub, sizeof sub, "empty");
+    const lv_font_t *ft = zune_font(&font_zune_light_21);
+    int h1 = lv_font_get_line_height(ft);
+    zlabel(r, g_plnames[i], ft, TC(TEXT_PRIMARY), 52, 3, 0);
+    zlabel(r, sub, zune_font(&font_zune_regular_13), TC(TEXT_MUTED), 53, 3 + h1 - 4, 0);
+    zthumb_mosaic(r, 0, (ROW_H - 40) / 2, 40, ids, ni);
+    ui_library_row(r);
+}
+/* history (Figma 30): the day over each run of songs, "artist · 7:12 pm" under each */
+static int zday(long long t){ time_t tt = (time_t)t; struct tm tm; localtime_r(&tt, &tm); return (tm.tm_year + 1900) * 400 + tm.tm_yday; }
+static void zday_label(char *b, size_t n, long long t){
+    time_t now = time(NULL), tt = (time_t)t; struct tm tm, nw; localtime_r(&tt, &tm); localtime_r(&now, &nw);
+    int d = zday((long long)now) - zday(t);
+    static const char *WD[] = { "SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY" };
+    static const char *MO[] = { "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC" };
+    if(t <= 0) snprintf(b, n, "EARLIER");
+    else if(d == 0) snprintf(b, n, "TODAY");
+    else if(d == 1) snprintf(b, n, "YESTERDAY");
+    else if(d > 1 && d < 7) snprintf(b, n, "%s", WD[tm.tm_wday]);
+    else snprintf(b, n, "%d %s", tm.tm_mday, MO[tm.tm_mon]);
+}
+static void zclock(char *b, size_t n, long long t){
+    time_t tt = (time_t)t; struct tm tm; localtime_r(&tt, &tm);
+    if(simple_cfg_get_int("time_24h", 1)) snprintf(b, n, "%d:%02d", tm.tm_hour, tm.tm_min);
+    else snprintf(b, n, "%d:%02d %s", (tm.tm_hour + 11) % 12 + 1, tm.tm_min, tm.tm_hour < 12 ? "am" : "pm");
+}
+static void zhistory_row(lv_obj_t *r, int i){
+    const mdb_song_t *so = &g_favs[i];
+    char sub[MDB_STR + 32];
+    if(g_view == VIEW_RECENT && so->played_at > 0){ char c[16]; zclock(c, sizeof c, so->played_at);
+        snprintf(sub, sizeof sub, "%s%s%s", so->artist, so->artist[0] ? " \xC2\xB7 " : "", c); }
+    else snprintf(sub, sizeof sub, "%s", so->artist);
+    zrow_two(r, so->title[0] ? so->title : "Untitled", sub, NULL, so->id == g_znow_id);
+    if(g_view == VIEW_RECENT && !g_virt && (i == 0 || zday(g_favs[i - 1].played_at) != zday(so->played_at))){
+        lv_obj_t *h = lv_obj_create(g_list); lv_obj_remove_style_all(h);              /* the day, over the first song of it */
+        lv_obj_set_size(h, 300, 26); lv_obj_add_flag(h, LV_OBJ_FLAG_USER_1); lv_obj_remove_flag(h, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        char d[24]; zday_label(d, sizeof d, so->played_at);
+        lv_obj_t *l = zlabel(h, d, &font_zune_semibold_11, TC(TEXT_MUTED), 10, 8, 0);
+        lv_obj_set_style_text_letter_space(l, 2, 0);
+        lv_obj_move_to_index(h, lv_obj_get_index(r));
+    }
+}
+/* hold an item: its menu offers "select" (picking several; on Zune the sideways swipe belongs to the pivot) */
+static int g_zsel_idx = -1;
+static void zsel_go(void){ if(g_zsel_idx >= 0 && lib_pick_ok()) mp_start(&g_mp, g_zsel_idx); }
+static void zsel_mark_cb(lv_event_t *e){
+    if(lv_event_get_code(e) != LV_EVENT_LONG_PRESSED || mp_active(&g_mp)) return;
+    g_zsel_idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if(lib_pick_ok()) songmenu_offer_select(zsel_go);
+}
+/* pivots (Windows Phone): a sideways swipe anywhere on the list moves to the next / previous of songs, albums,
+ * artists, genres - round, like the titles; the edge swipe stays "back" */
+static const int ZPIV[] = { VIEW_SONGS, VIEW_ALBUMS, VIEW_ARTISTS, VIEW_GENRES };
+static int zpiv_index(void){ for(int k = 0; k < 4; k++) if(g_view == ZPIV[k]) return k; return -1; }
+static void menu_go(int v);
+static void zpiv_anim_x(void *o, int32_t v){ lv_obj_set_style_translate_x(o, v, 0); }
+static void zpiv_slide(int dir){
+    lv_obj_t *o[2] = { g_list, g_zpiv };
+    for(int k = 0; k < 2; k++){
+        lv_anim_t a; lv_anim_init(&a); lv_anim_set_var(&a, o[k]); lv_anim_set_exec_cb(&a, zpiv_anim_x);
+        lv_anim_set_values(&a, dir * (k ? 90 : 60), 0); lv_anim_set_duration(&a, k ? 260 : 220);
+        lv_anim_set_path_cb(&a, lv_anim_path_ease_out); lv_anim_start(&a);
+    }
+}
+static void zpiv_go(void *p){
+    int dir = (int)(intptr_t)p, k = zpiv_index();
+    if(k < 0) return;
+    int v = ZPIV[(k + dir + 4) % 4];
+    menu_go(v);
+    if(screen_current() == SCR_LIBRARY && g_view == v) zpiv_slide(dir);
+}
+/* the pointer's travel is watched from the press on (LVGL's own gesture never reaches a list row here): a long,
+ * flat sideways move that isn't scrolling anything turns the pivot, and the touch gives no tap or hold */
+static lv_point_t g_zpress;
+static lv_timer_t *g_zwatch;
+static int zpiv_allowed(void){
+    if(!th_zune() || screen_current() != SCR_LIBRARY || zpiv_index() < 0 || mp_active(&g_mp) || azjump_active()) return 0;
+    if(g_az.grid && !lv_obj_has_flag(g_az.grid, LV_OBJ_FLAG_HIDDEN)) return 0;
+    return g_zpress.y >= 30 && g_zpress.x >= 64;                           /* the status line; the back-swipe strip */
+}
+static void zwatch_stop(void){ if(g_zwatch){ lv_timer_delete(g_zwatch); g_zwatch = NULL; } }
+static void zwatch_cb(lv_timer_t *t){
+    lv_indev_t *in = lv_timer_get_user_data(t);
+    if(!in || lv_indev_get_state(in) != LV_INDEV_STATE_PRESSED || !zpiv_allowed()){ zwatch_stop(); return; }
+    if(lv_indev_get_scroll_obj(in)){ zwatch_stop(); return; }              /* the list is scrolling: not a pivot swipe */
+    lv_point_t p; lv_indev_get_point(in, &p);
+    int dx = p.x - g_zpress.x, dy = p.y - g_zpress.y;
+    if(abs(dx) >= 44 && abs(dy) * 2 < abs(dx)){
+        zwatch_stop();
+        lv_indev_wait_release(in);                                         /* no tap or hold from this touch */
+        lv_async_call(zpiv_go, (void *)(intptr_t)(dx < 0 ? 1 : -1));
+    }
+}
+static void zpiv_indev_cb(lv_event_t *e){
+    lv_indev_t *in = lv_indev_active();
+    if(!in) return;
+    lv_event_code_t c = lv_event_get_code(e);
+    if(c == LV_EVENT_PRESSED){
+        lv_indev_get_point(in, &g_zpress); zwatch_stop();
+        if(zpiv_allowed()) g_zwatch = lv_timer_create(zwatch_cb, 10, in);
+    } else if(c == LV_EVENT_RELEASED) zwatch_stop();
+}
+static void zpiv_attach(void){
+    static int done;
+    if(done) return;
+    for(lv_indev_t *i = lv_indev_get_next(NULL); i; i = lv_indev_get_next(i))
+        if(lv_indev_get_type(i) == LV_INDEV_TYPE_POINTER){ lv_indev_add_event_cb(i, zpiv_indev_cb, LV_EVENT_ALL, NULL); done = 1; }
+}
+void library_open_pivot(int k){                 /* the cover flow's "artists": that pivot, in the Library */
+    if(k < 0 || k > 3) return;
+    focus_clear(); g_deeplink = 0; g_from_artist = 0; g_drill_kind = 0; g_view = ZPIV[k]; g_zmenu_focus = k; library_reload();
+    screen_show(SCR_LIBRARY);
+}
+int library_pivot_swipe(int dir){ if(!th_zune() || zpiv_index() < 0 || mp_active(&g_mp)) return 0; zpiv_go((void *)(intptr_t)dir); return 1; }
+
+/* the Music dial (Figma 29:53) */
+static const int ZCATV[] = { VIEW_SONGS, VIEW_ALBUMS, VIEW_ARTISTS, VIEW_GENRES, VIEW_PLAYLISTS, VIEW_FAVS, CAT_FOLDERS, CAT_BOOKS, VIEW_HISTORY };
+static const char *const ZCATS[] = { "songs", "albums", "artists", "genres", "playlists", "favourites", "folders", "books", "history" };
+static int g_zmap[9], g_zmap_n;
+static void zmenu_go(void *p){ menu_go((int)(intptr_t)p); }
+static void zmenu_pick(int i){
+    if(i < 0 || i >= g_zmap_n) return;
+    g_zmenu_focus = i;
+    lv_async_call(zmenu_go, (void *)(intptr_t)ZCATV[g_zmap[i]]);   /* the dial is rebuilt: not from inside its own click */
+}
+static void zcount(char *b, size_t n, int c, const char *what){
+    if(c < 0) b[0] = 0; else snprintf(b, n, "%d %s%s", c, what, c == 1 ? "" : "s");
+}
+static void zmenu_build(void){
+    lv_obj_t *root = lv_obj_get_parent(g_list);
+    if(g_zmenu){ lv_obj_delete(g_zmenu); g_zmenu = NULL; }
+    g_zmenu = lv_obj_create(root); lv_obj_remove_style_all(g_zmenu); kit_keep(g_zmenu);
+    lv_obj_set_size(g_zmenu, 360, 360); lv_obj_remove_flag(g_zmenu, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_move_to_index(g_zmenu, lv_obj_get_index(g_list) + 1);
+    const char *lb[9]; g_zmap_n = 0;
+    for(int k = 0; k < 9; k++){ if(!DISKOS_AUDIOBOOKS && ZCATV[k] == CAT_BOOKS) continue; g_zmap[g_zmap_n] = k; lb[g_zmap_n++] = ZCATS[k]; }
+    if(g_zmenu_focus >= g_zmap_n) g_zmenu_focus = 0;
+    zdial_build(g_zmenu, lb, g_zmap_n, g_zmenu_focus, zmenu_pick, 80, "library.zmenu");
+    for(int i = 0; i < g_zmap_n; i++){
+        char b[40]; int v = ZCATV[g_zmap[i]], c = -1; const char *w = NULL;
+        if(v == VIEW_SONGS){ c = mdb_song_count(); w = "song"; }
+        else if(v == VIEW_ALBUMS){ c = mdb_album_count(); w = "album"; }
+        else if(v == VIEW_ARTISTS){ c = mdb_artist_count(); w = "artist"; }
+        else if(v == VIEW_GENRES && g_gnames && g_gcounts){ c = mdb_genres(g_gnames, g_gcounts, g_grp_cap); w = "genre"; }
+        else if(v == VIEW_PLAYLISTS){ c = mdb_playlist_num(); w = "playlist"; }
+        else if(v == VIEW_FAVS){ c = mdb_favorite_count(); w = "song"; }
+        if(w){ zcount(b, sizeof b, c, w); zdial_set_sub(i, b); }
+    }
+}
+static void znext_cb(lv_event_t *e){
+    if(lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    int v = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_current_target(e));
+    for(int i = 0; i < g_zmap_n; i++) if(ZCATV[g_zmap[i]] == v) g_zmenu_focus = i;
+    if(v > 0) menu_go(v);
+}
+/* Zune geometry for the view about to be built: the list under the pivot (or the whole glass for an album), the
+ * pivot title and the next category peeking in at its right (Figma: "songs  alb"), the fades */
+static void zlib_layout(void){
+    int menu = g_view == VIEW_MENU, full = lib_zalbum();
+    if(g_zmenu && !menu){ lv_obj_delete(g_zmenu); g_zmenu = NULL; }
+    if(menu) lv_obj_add_flag(g_list, LV_OBJ_FLAG_HIDDEN); else lv_obj_remove_flag(g_list, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_pos(g_list, 0, full ? 0 : 96); lv_obj_set_size(g_list, 360, full ? 360 : 264);
+    int pad = full ? 0 : (g_view == VIEW_ALBUMS || g_view == VIEW_PLAYLISTS) ? 8 : (g_view == VIEW_SONGS || g_view == VIEW_FAVS || g_view == VIEW_ARTIST_ALBUMS ||
+              (g_view == VIEW_GROUP && !(g_drill_kind != 1 && g_scope_lvl == 1))) ? 8 : 26;
+    lv_obj_set_style_pad_top(g_list, pad, 0); lv_obj_set_style_pad_bottom(g_list, 70, 0);
+    lv_obj_set_style_pad_left(g_list, 0, 0); lv_obj_set_style_pad_row(g_list, 4, 0);
+    lv_obj_set_flex_align(g_list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    g_hdr_extra_px = pad;
+    if(menu || full) lv_obj_add_flag(g_zpiv, LV_OBJ_FLAG_HIDDEN); else lv_obj_remove_flag(g_zpiv, LV_OBJ_FLAG_HIDDEN);
+    if(menu) lv_obj_remove_flag(g_zmusic, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(g_zmusic, LV_OBJ_FLAG_HIDDEN);
+    if(menu || full) lv_obj_add_flag(g_zfade[0], LV_OBJ_FLAG_HIDDEN); else lv_obj_remove_flag(g_zfade[0], LV_OBJ_FLAG_HIDDEN);
+    if(menu) lv_obj_add_flag(g_zfade[1], LV_OBJ_FLAG_HIDDEN); else lv_obj_remove_flag(g_zfade[1], LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(g_zarc, LV_OBJ_FLAG_HIDDEN);
+    /* the next category, dimmed, cut by the rim */
+    static const int NEXT[VIEW_COUNT] = { [VIEW_SONGS] = VIEW_ALBUMS, [VIEW_ALBUMS] = VIEW_ARTISTS, [VIEW_ARTISTS] = VIEW_GENRES,
+        [VIEW_GENRES] = VIEW_SONGS };                           /* the pivots (Figma 18): songs, albums, artists, genres, round */
+    int nx = (g_view >= 0 && g_view < VIEW_COUNT) ? NEXT[g_view] : 0;
+    if(nx){ lv_label_set_text(g_znext, zlow(tr(VIEW_TITLE[nx])));
+            lv_obj_set_user_data(g_znext, (void *)(intptr_t)nx); lv_obj_remove_flag(g_znext, LV_OBJ_FLAG_HIDDEN); }
+    else lv_obj_add_flag(g_znext, LV_OBJ_FLAG_HIDDEN);
+    track_state_t st; ipc_get_state(&st);
+    g_znow_id = st.have_track ? mdb_song_id_by_path(st.path) : 0;
+    zthumb_cancel();
+    free(g_zac); free(g_zsc); g_zac = g_zsc = NULL;
+}
+static void zlib_title(const char *t){
+    lv_label_set_text(g_title, t);
+    lv_point_t sz; lv_text_get_size(&sz, t, lv_obj_get_style_text_font(g_title, 0), lv_obj_get_style_text_letter_space(g_title, 0), 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    int x = lv_obj_get_x(g_title) + sz.x + 24;
+    lv_obj_set_pos(g_znext, x, lv_obj_get_y(g_title));
+    if(x > 330) lv_obj_add_flag(g_znext, LV_OBJ_FLAG_HIDDEN);
+}
+static void zlib_chrome(lv_obj_t *root){
+    for(int k = 0; k < 2; k++){                                   /* fades: under the pivot, and at the bottom */
+        lv_obj_t *f = lv_obj_create(root); lv_obj_remove_style_all(f); kit_keep(f);
+        lv_obj_set_size(f, 360, k ? 76 : 116); lv_obj_align(f, k ? LV_ALIGN_BOTTOM_MID : LV_ALIGN_TOP_MID, 0, 0);
+        lv_obj_set_style_bg_color(f, TC(CANVAS), 0); lv_obj_set_style_bg_grad_color(f, TC(CANVAS), 0);
+        lv_obj_set_style_bg_grad_dir(f, LV_GRAD_DIR_VER, 0); lv_obj_set_style_bg_opa(f, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_main_opa(f, k ? LV_OPA_TRANSP : LV_OPA_COVER, 0); lv_obj_set_style_bg_grad_opa(f, k ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+        lv_obj_set_style_bg_main_stop(f, k ? 0 : 210, 0); lv_obj_set_style_bg_grad_stop(f, k ? 230 : 255, 0);
+        lv_obj_remove_flag(f, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        g_zfade[k] = f;
+    }
+    g_zarc = lv_arc_create(root); kit_keep(g_zarc);               /* where the list is: a short arc on the right rim */
+    lv_obj_remove_style(g_zarc, NULL, LV_PART_KNOB);
+    lv_obj_remove_flag(g_zarc, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(g_zarc, 344, 344); lv_obj_center(g_zarc);
+    lv_obj_set_style_arc_width(g_zarc, 3, LV_PART_MAIN); lv_obj_set_style_arc_rounded(g_zarc, true, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(g_zarc, TC(TEXT_PRIMARY), LV_PART_MAIN); lv_obj_set_style_arc_width(g_zarc, 0, LV_PART_INDICATOR);
+    lv_obj_add_flag(g_zarc, LV_OBJ_FLAG_HIDDEN);
+    g_zpiv = lv_obj_create(root); lv_obj_remove_style_all(g_zpiv); kit_keep(g_zpiv);
+    lv_obj_set_size(g_zpiv, 360, 100); lv_obj_remove_flag(g_zpiv, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    g_title = zune_pivot(g_zpiv, "", back_cb);
+    g_znext = lv_label_create(g_zpiv); kit_keep(g_znext);
+    lv_label_set_long_mode(g_znext, LV_LABEL_LONG_CLIP); lv_obj_set_width(g_znext, 200);
+    lv_obj_set_style_text_font(g_znext, lv_obj_get_style_text_font(g_title, 0), 0);
+    lv_obj_set_style_text_letter_space(g_znext, -2, 0);
+    lv_obj_set_style_text_color(g_znext, TC(TEXT_PRIMARY), 0); lv_obj_set_style_text_opa(g_znext, LV_OPA_40, 0);
+    lv_obj_add_flag(g_znext, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_ext_click_area(g_znext, 8);
+    ui_on(g_znext, znext_cb, LV_EVENT_CLICKED, NULL, "library.znext", UI_CORE);
+    g_zmusic = lv_label_create(root); kit_keep(g_zmusic);
+    lv_label_set_text(g_zmusic, "MUSIC");
+    lv_obj_set_style_text_font(g_zmusic, &font_zune_semibold_11, 0); lv_obj_set_style_text_letter_space(g_zmusic, 2, 0);
+    lv_obj_set_style_text_color(g_zmusic, TC(TEXT_MUTED), 0); lv_obj_align(g_zmusic, LV_ALIGN_TOP_MID, 0, 38);
+    zune_status(root, SCR_LIBRARY);
+    zpiv_attach();
+}
+
 static void library_reload_inner(void){
     if(!g_list) return;
     if(g_lhint){ lv_obj_add_flag(g_lhint, LV_OBJ_FLAG_HIDDEN); g_lhint_ch = 0; }  /* don't leave a stale A-Z hint across views */
@@ -1129,7 +1765,9 @@ static void library_reload_inner(void){
     lv_obj_scroll_to_y(g_list, 0, LV_ANIM_OFF);
 
     const char *ttl = (g_view==VIEW_GROUP) ? g_drill : (g_view==VIEW_ARTIST_ALBUMS) ? g_artist : VIEW_TITLE[g_view];
-    if(g_title) lv_label_set_text(g_title, ttl);
+    if(th_zune()){ zpiv_attach(); zlib_layout(); zlib_title((g_view==VIEW_GROUP && g_scope_lvl==2 && g_drill_kind!=1) ? g_scope_album
+                                             : (g_view==VIEW_GROUP || g_view==VIEW_ARTIST_ALBUMS) ? ttl : g_view==VIEW_RECENT ? "history" : zlow(tr(ttl))); }
+    else if(g_title) lv_label_set_text(g_title, ttl);
     az_show(0);
 
     /* one-time discoverability hints for the invisible long-press actions */
@@ -1142,6 +1780,7 @@ static void library_reload_inner(void){
 
     char dur[12];
 
+    if(g_view==VIEW_MENU && th_zune()){ zmenu_build(); return; }
     if(g_view==VIEW_MENU){
         /* "Most Played" + "Recently Played" are play STATS, not catalog axes -> grouped under History */
         static const char *CATS[] = { "Songs","Albums","Artists","Genres","Playlists","Favourites","Folders","Books","History" };
@@ -1164,7 +1803,8 @@ static void library_reload_inner(void){
         for(int i=0;i<2;i++){
             lv_obj_t *r = base_row();
             ui_on(r, menu_cb, LV_EVENT_CLICKED, (void*)(uintptr_t)HCATV[i], "library.menu", UI_CORE);
-            row_two(r, tr(HCATS[i]), NULL, NULL);
+            row_two(r, th_zune() ? zlow(tr(HCATS[i])) : tr(HCATS[i]), NULL, NULL);
+            if(th_zune()) continue;
             lv_obj_t *ch = lv_label_create(r);
             lv_label_set_text(ch, LV_SYMBOL_RIGHT);
             lv_obj_set_pos(ch, 240, (ROW_H - 18) / 2);
@@ -1182,6 +1822,7 @@ static void library_reload_inner(void){
             g_scope_total = (g_drill_kind==3) ? mdb_genre_songs(g_drill, g_buf, g_alloc_n) : mdb_artist_songs(g_drill, g_buf, g_alloc_n);
             g_first[0] = '#';
             for(int i=0;i<n;i++) g_first[i+1]=first_letter(g_gnames[i]);
+            if(th_zune()){ g_count = n + 1; zscope_page(n); return; }    /* Figma 70: the covers sideways, "all songs" */
             g_count = n + 1; fill_start(n + 1);
             if(n > 12) az_show(1);
             return;
@@ -1194,9 +1835,17 @@ static void library_reload_inner(void){
         else { n=mdb_song_count(); if(n>g_alloc_n) n=g_alloc_n; for(int i=0;i<n;i++) g_buf[i]=mdb_song(i); }
         if(n<=0){ empty_scan(tr("No songs found")); return; }
         int is_album = (g_view==VIEW_GROUP && (g_drill_kind==1 || g_scope_lvl==2));
+        if(th_zune()){
+            if(is_album) zalbum_header(g_scope_lvl==2 && g_drill_kind!=1 ? g_scope_album : g_drill, n);
+            else if(g_view==VIEW_SONGS){ static const char *const L[] = { "shuffle all" }, *const A[] = { "library.shuffle" };
+                static const lv_event_cb_t C[] = { shuffle_all_cb }; zlinks(L, C, A, 1); }
+            else { static const char *const L[] = { "play all", "shuffle", "+ playlist" }, *const A[] = { "library.play_all", "library.shuffle", "library.add_plist" };
+                static const lv_event_cb_t C[] = { play_all_cb, shuffle_all_cb, add_plist_cb }; zlinks(L, C, A, 3); }
+        } else {
         if(is_album) add_album_cover_header(g_scope_lvl==2 && g_drill_kind!=1 ? g_scope_album : g_drill, n>0 ? g_buf[0]->artist : NULL);  /* album drill: cover on top */
         add_play_header(is_album);                                       /* centre the pair under the album cover */
         if(g_view==VIEW_GROUP) add_plist_row(is_album);                  /* album / artist / genre: add these songs to a playlist */
+        }
         for(int i=0;i<n;i++) g_first[i]=first_letter(g_buf[i]->title);
         g_count=n; fill_start(n);
         if(g_view==VIEW_SONGS) az_show(1);
@@ -1204,22 +1853,32 @@ static void library_reload_inner(void){
         int n=mdb_albums(g_gnames,g_gartists,g_gcounts,g_grp_cap);
         if(n<=0){ empty_scan(tr("No albums found")); return; }
         for(int i=0;i<n;i++) g_first[i]=first_letter(g_gnames[i]);
+        if(th_zune()){                                                   /* the wall: three covers a row */
+            g_znalb = n; free(g_zrep); g_zrep = calloc((size_t)n, sizeof *g_zrep);
+            if(g_zrep) mdb_album_rep_ids(g_zrep, n);
+            g_count=n; fill_start((n+2)/3); az_show(1);
+        } else {
         g_count=n; fill_start(n); az_show(1);
+        }
     } else if(g_view==VIEW_ARTIST_ALBUMS){
         lib_ensure_group_cap(512);
         int n=artist_albums(g_artist);
         if(n<=0){ empty_scan("No songs found"); return; }
+        if(th_zune()){ g_count=n; zartist_page(n); return; }
         add_play_header(0);                     /* Play All / Shuffle = everything by this artist */
         g_count=n; fill_start(n);
     } else if(g_view==VIEW_ARTISTS){
         lib_ensure_group_cap(mdb_artist_count());   /* size for every distinct artist so none are clipped */
         int n=mdb_artists(g_gnames,g_grp_cap);
         if(n<=0){ empty_scan(tr("No artists found")); return; }
+        if(th_zune()){ g_zac = malloc((size_t)n * sizeof *g_zac); g_zsc = malloc((size_t)n * sizeof *g_zsc);
+                       if(g_zac && g_zsc) for(int i=0;i<n;i++) g_zac[i] = g_zsc[i] = -1; else { free(g_zac); free(g_zsc); g_zac = g_zsc = NULL; } }
         for(int i=0;i<n;i++) g_first[i]=first_letter(g_gnames[i]);
         g_count=n; fill_start(n); az_show(1);
     } else if(g_view==VIEW_GENRES){
         int n=mdb_genres(g_gnames,g_gcounts,g_grp_cap);
         if(n<=0){ empty_scan(tr("No genres found")); return; }
+        if(th_zune()){ g_zac = malloc((size_t)n * sizeof *g_zac); if(g_zac) for(int i=0;i<n;i++) g_zac[i] = -1; }
         for(int i=0;i<n;i++) g_first[i]=first_letter(g_gnames[i]);
         g_count=n; fill_start(n); az_show(1);
     } else if(g_view==VIEW_FAVS){
@@ -1228,7 +1887,12 @@ static void library_reload_inner(void){
         lib_ensure_fav_cap(mdb_favorite_count());
         int n=mdb_favorites(g_favs, g_fav_cap < g_grp_cap ? g_fav_cap : g_grp_cap, fw_fav_play_by_love_id());
         if(n<=0){ empty_label(tr("No Favourites yet")); return; }
-        add_play_header(0);
+        if(th_zune()){ static const char *const L[] = { "play", "shuffle" }, *const A[] = { "library.play_all", "library.shuffle" };
+                       static const lv_event_cb_t C[] = { play_all_cb, shuffle_all_cb }; zlinks(L, C, A, 2);
+                       lv_obj_t *hr = lv_obj_get_child(g_list, -1), *c = lv_label_create(hr);   /* Figma 27: "38 songs" after them */
+                       char b[24]; snprintf(b, sizeof b, "%d song%s", n, n == 1 ? "" : "s"); lv_label_set_text(c, b);
+                       lv_obj_set_style_text_font(c, zune_font(&font_zune_regular_13), 0); lv_obj_set_style_text_color(c, TC(TEXT_MUTED), 0); }
+        else add_play_header(0);
         for(int i=0;i<n;i++) g_first[i]=first_letter(g_favs[i].title);
         g_count=n; fill_start(n); az_show(1);
     } else if(g_view==VIEW_MOSTPLAYED || g_view==VIEW_RECENT){
@@ -1239,6 +1903,8 @@ static void library_reload_inner(void){
         int cap=g_fav_cap<want?g_fav_cap:want;
         int n = (g_view==VIEW_MOSTPLAYED) ? mdb_mostplayed(g_favs, cap) : mdb_recent(g_favs, cap);
         if(n<=0){ empty_label(tr("Nothing played yet")); return; }
+        if(th_zune() && g_view==VIEW_RECENT){ static const char *const L[] = { "most played" }, *const A[] = { "library.mostplayed" };
+                                              static const lv_event_cb_t C[] = { zmost_cb }; zlinks(L, C, A, 1); }
         g_count=n; fill_start(n);   /* ordered by plays / recency -> no Play-All header, no A-Z */
     } else { /* VIEW_PLAYLISTS */
         /* grow the buffers to the real playlist count (kept file-scope: playlist_cb reads
@@ -1257,17 +1923,19 @@ static void library_reload_inner(void){
         /* "New Playlist" is always first so an empty library can still create one */
         lv_obj_t *nr=base_row();
         ui_on(nr, pl_new_cb, LV_EVENT_CLICKED, NULL, "library.pl_new", UI_CORE);
+        if(th_zune()) zplaylist_new_row(nr); else
         row_two(nr, tr_sym(LV_SYMBOL_PLUS, "New Playlist"), NULL, NULL);
         theme_list_row(nr);
         for(int i=0;i<n;i++){
             lv_obj_t *r=base_row();
             lv_obj_add_event_cb(r, playlist_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+            if(th_zune()){ zplaylist_row(r, i); continue; }
             int c = mdb_playlist_count(g_plids[i]); if(c < 0) c = 0;
             char sub[24]; snprintf(sub, sizeof sub, "%d song%s", c, c == 1 ? "" : "s");
             row_two(r, g_plnames[i], sub, NULL);                         /* the name, and how many songs under it */
         }
     }
-    if(th_braun()){ lv_obj_update_layout(g_list); curve_rows(); }   /* Braun: every view's rows get the Braun styling */
+    if(th_braun() || th_zune()){ lv_obj_update_layout(g_list); curve_rows(); }   /* Braun: every view's rows get the Braun styling; Zune: the curve */
 }
 
 /* Twelve session-local views, no flash writes on scrolling. Restore after rebuilding
@@ -1425,7 +2093,7 @@ void library_create(lv_obj_t *root){
     lv_obj_set_style_bg_color(root, TC(CANVAS), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
 
-    g_title = ui_header_cb(root, "Library", back_cb);   /* shared header; back_cb pops the internal view stack */
+    if(!th_zune()) g_title = ui_header_cb(root, "Library", back_cb);   /* shared header; back_cb pops the internal view stack */
 
     g_list = lv_obj_create(root);
     lv_obj_remove_style_all(g_list);
@@ -1439,6 +2107,7 @@ void library_create(lv_obj_t *root){
     lv_obj_add_event_cb(g_list, focus_scroll_begin, LV_EVENT_SCROLL_BEGIN, NULL);
     ui_library_list_watch(g_list);
     pdots_create(root);                          /* after the list, so they draw on top of it */
+    if(th_zune()) zlib_chrome(root);             /* pivot title, fades, rim arc, status (Figma, Library page) */
     lv_obj_set_scroll_dir(g_list, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(g_list, LV_SCROLLBAR_MODE_OFF);
     lv_obj_add_flag(g_list, LV_OBJ_FLAG_SCROLL_MOMENTUM);

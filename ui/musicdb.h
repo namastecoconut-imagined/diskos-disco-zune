@@ -41,6 +41,7 @@ typedef struct {
     /* The stock sort codes stored on the row (mdb_load only; 0 when the schema has none): the Artists/Albums/Genres lists
      * order by these exactly as the player's own queries do, so non-Latin names land where stock puts them. */
     int  code_artist, code_album, code_genre, code_group;   /* ARTIST_CODE / ALBUM_CODE / GENRE_CODE / album-artist-or-artist code */
+    long long played_at;    /* PLAY_STATS.LAST_PLAYED (epoch s) - set by mdb_recent / mdb_mostplayed only */
 } mdb_song_t;
 
 /* Load the whole library once (one sqlite3 call). Safe to call repeatedly;
@@ -199,6 +200,7 @@ long mdb_book_scope_set(const char *path);   /* point the reserved single-book p
 int  mdb_playlist_export(long pid, const char *name, char *outname, int cap);   /* write /tmp/sdcard/<name>.m3u; 1=ok */
 int  mdb_playlist_songs(long pid, mdb_song_t *out, int cap);
 int  mdb_playlist_count(long pid);
+int  mdb_playlist_cover_ids(long pid, int *ids, int cap, int *nids, long *ms);   /* count; covers of up to cap albums; length */
 /* scan a dir for *.m3u / *.m3u8 and import each new one as a playlist; returns # imported */
 int  mdb_import_m3u_dir(const char *dir);
 /* import from every folder under the SD root (bounded depth/count, no hidden dirs or links); returns # imported */

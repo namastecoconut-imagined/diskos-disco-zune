@@ -3,6 +3,12 @@
 #include "screens.h"
 #include "theme.h"
 #include "braun.h"
+#include "theme_kit.h"
+#include "zune_dial.h"
+#include <math.h>
+#include <stdlib.h>
+LV_FONT_DECLARE(font_zune_regular_13)
+LV_FONT_DECLARE(font_zune_regular_16)
 #include "musicdb.h"
 #include <sys/stat.h>
 #include <string.h>
@@ -239,6 +245,7 @@ static int si_poll(const char *path, int track, si_tech_t *out, int *changed){
     return got;
 }
 
+static void zsi_build(lv_obj_t *root, lv_obj_t *list);
 static void sleeve_back_cb(lv_event_t *e){ (void)e; screen_back(); }
 void songinfo_create(lv_obj_t *root)
 {
@@ -314,6 +321,7 @@ void songinfo_create(lv_obj_t *root)
         g_val[i] = v;
         if(i == F_TITLE || i == F_ARTIST) lv_obj_add_flag(cell, LV_OBJ_FLAG_HIDDEN);   /* shown in the header instead */
     }
+    if(th_zune()){ zsi_build(root, list); return; }
     if(th_disco_family()){
         /* Album back sleeve: a compact artwork stamp and a roomy metadata panel.
          * The existing metadata worker and pinned-track handling stay shared. */
@@ -385,6 +393,67 @@ void songinfo_create(lv_obj_t *root)
             if(g_val[i]) lv_obj_set_style_text_color(g_val[i], TC(TEXT_PRIMARY), 0);
         }
     }
+}
+
+/* ---- Zune (Figma 14): "info" as a pivot header; every fact as a small grey label over its value, the rows stepping
+ * in and out with the round glass as they scroll, fading at the bottom. ---- */
+static lv_obj_t *g_zlist;
+static void zsi_layout(void){
+    if(!g_zlist) return;
+    lv_area_t la; lv_obj_get_coords(g_zlist, &la);
+    for(int i = 0; i < F_COUNT; i++){
+        if(!g_cell[i] || lv_obj_has_flag(g_cell[i], LV_OBJ_FLAG_HIDDEN)) continue;
+        char *k = lv_label_get_text(g_key[i]);                     /* labels in lower case, as the rest of Zune */
+        int up = 0; for(char *c = k; *c; c++) if(*c >= 'A' && *c <= 'Z') up = 1;
+        if(up){ char b[48]; int n = 0; for(char *c = k; *c && n < 47; c++) b[n++] = (char)tolower((unsigned char)*c); b[n] = 0; lv_label_set_text(g_key[i], b); }
+        lv_area_t a; lv_obj_get_coords(g_cell[i], &a);
+        int y = (a.y1 + a.y2) / 2; int d = y - 180; if(d > 175) d = 175; if(d < -175) d = -175;
+        int x = (int)lroundf(180.0f - sqrtf(32400.0f - (float)(d * d))) + 26;
+        if(lv_obj_get_style_translate_x(g_cell[i], 0) != x) lv_obj_set_style_translate_x(g_cell[i], x, 0);
+        int w = 300 - x - (int)lroundf(180.0f - sqrtf(32400.0f - (float)(d * d)));
+        if(w < 120) w = 120;
+        if(lv_obj_get_style_width(g_val[i], 0) != w) lv_obj_set_width(g_val[i], w);
+    }
+}
+static int g_zsi_pending;
+static void zsi_async(void *u){ (void)u; g_zsi_pending = 0; zsi_layout(); }
+static void zsi_cb(lv_event_t *e){
+    if(lv_event_get_code(e) == LV_EVENT_SCROLL){ zsi_layout(); return; }
+    if(!g_zsi_pending){ g_zsi_pending = 1; lv_async_call(zsi_async, NULL); }   /* after the layout pass, never inside it */
+}
+static void zsi_build(lv_obj_t *root, lv_obj_t *list){
+    lv_obj_t *hide[] = { g_ring, g_cover, g_title, g_artist, g_header };
+    for(unsigned i = 0; i < sizeof hide / sizeof hide[0]; i++) if(hide[i]) lv_obj_add_flag(hide[i], LV_OBJ_FLAG_HIDDEN);
+    for(uint32_t i = 0; g_header && i < lv_obj_get_child_count(root); i++){       /* the stock header's back control too */
+        lv_obj_t *c = lv_obj_get_child(root, i);
+        if(c != list && c != g_ring && c != g_cover && c != g_title && c != g_artist) lv_obj_add_flag(c, LV_OBJ_FLAG_HIDDEN);
+    }
+    zune_pivot(root, "info", NULL);
+    zune_status(root, SCR_SONGINFO);
+    g_zlist = list; kit_keep(list);
+    lv_obj_set_pos(list, 0, 100); lv_obj_set_size(list, 360, 260);
+    lv_obj_set_style_pad_row(list, 14, 0); lv_obj_set_style_pad_top(list, 6, 0); lv_obj_set_style_pad_bottom(list, 90, 0);
+    lv_obj_set_flex_align(list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    for(int i = 0; i < F_COUNT; i++){
+        lv_obj_set_width(g_cell[i], 320); lv_obj_set_flex_flow(g_cell[i], LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_style_pad_row(g_cell[i], 2, 0);
+        lv_obj_set_width(g_key[i], LV_SIZE_CONTENT); lv_obj_set_style_text_align(g_key[i], LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_set_style_text_font(g_key[i], &font_zune_regular_13, 0); lv_obj_set_style_text_color(g_key[i], TC(TEXT_MUTED), 0);
+        lv_obj_set_style_text_font(g_val[i], zune_font(&font_zune_regular_16), 0); lv_obj_set_style_text_color(g_val[i], TC(TEXT_PRIMARY), 0);
+        lv_label_set_long_mode(g_val[i], LV_LABEL_LONG_DOT);
+        lv_obj_set_height(g_val[i], lv_font_get_line_height(&font_zune_regular_16));
+        kit_keep(g_cell[i]); kit_keep(g_key[i]); kit_keep(g_val[i]);
+        if(i == F_TITLE || i == F_ARTIST) lv_obj_remove_flag(g_cell[i], LV_OBJ_FLAG_HIDDEN);   /* no header shows them here */
+    }
+    lv_obj_t *f = lv_obj_create(root); lv_obj_remove_style_all(f); kit_keep(f);              /* fade at the bottom */
+    lv_obj_set_size(f, 360, 64); lv_obj_align(f, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_color(f, TC(CANVAS), 0); lv_obj_set_style_bg_grad_color(f, TC(CANVAS), 0);
+    lv_obj_set_style_bg_grad_dir(f, LV_GRAD_DIR_VER, 0); lv_obj_set_style_bg_opa(f, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_main_opa(f, LV_OPA_TRANSP, 0); lv_obj_set_style_bg_grad_opa(f, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(f, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(list, zsi_cb, LV_EVENT_SCROLL, NULL);
+    lv_obj_add_event_cb(list, zsi_cb, LV_EVENT_LAYOUT_CHANGED, NULL);
+    lv_obj_add_event_cb(list, zsi_cb, LV_EVENT_SIZE_CHANGED, NULL);
 }
 
 /* Another song's details (from a long-press menu): shown until Song Info is opened for the playing track. */

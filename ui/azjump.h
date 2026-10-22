@@ -12,4 +12,5 @@ void azjump_position(azjump_t *,char letter,int x,int y);
 int azjump_active(void);
 int azjump_owns_point(int x,int y);
 int azjump_close_active(void);
+void azjump_letter(azjump_t *a, char letter);   /* Zune: the letter in the jump dot */
 #endif

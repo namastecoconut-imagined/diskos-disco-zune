@@ -10,7 +10,10 @@
 #include "scanner.h"
 #include "braun.h"
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
+#include "zune_dial.h"
+#include "theme_kit.h"
 
 static lv_obj_t   *g_toast;
 static lv_timer_t *g_toast_timer;
@@ -28,6 +31,8 @@ void ui_toast_icon(const char *icon, lv_color_t icol, const char *msg)
     if(g_toast){ lv_obj_delete_async(g_toast); g_toast = NULL; }
     if(g_toast_timer){ lv_timer_delete(g_toast_timer); g_toast_timer = NULL; }
 
+    if(th_zune()){ void zune_toast(const char *icon, const char *msg); zune_toast(icon, msg);
+                   g_toast_timer = lv_timer_create(toast_hide_cb, 2400, NULL); return; }
     g_toast = lv_obj_create(lv_layer_top());
     lv_obj_remove_style_all(g_toast);
     int br = th_braun();                                       /* Braun: an off-white panel, dark text, an orange lamp */
@@ -120,4 +125,54 @@ void ui_scan_orbit(int on){
         if(!g_orb_timer) g_orb_timer = lv_timer_create(orb_tick, 50, NULL);   /* 20 fps: smooth enough, cheap */
         else lv_timer_resume(g_orb_timer);
     } else if(g_orb_timer) lv_timer_pause(g_orb_timer);
+}
+
+/* ---- Zune (Figma 06): a dark pill under the top arc - an accent disc with a small drawn mark, the message beside it,
+ * the part after " - " or " \xC2\xB7 " as a quieter second line ---- */
+LV_FONT_DECLARE(font_zune_regular_14) LV_FONT_DECLARE(font_zune_regular_12)
+void zune_toast(const char *icon, const char *msg){
+    g_toast = lv_obj_create(lv_layer_top()); lv_obj_remove_style_all(g_toast); kit_keep(g_toast);
+    lv_obj_set_style_bg_color(g_toast, TC(SURFACE), 0); lv_obj_set_style_bg_opa(g_toast, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(g_toast, TC(TEXT_MUTED), 0); lv_obj_set_style_border_width(g_toast, 1, 0);
+    lv_obj_set_style_border_opa(g_toast, LV_OPA_60, 0);
+    lv_obj_set_style_radius(g_toast, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_pad_left(g_toast, 12, 0); lv_obj_set_style_pad_right(g_toast, 18, 0); lv_obj_set_style_pad_ver(g_toast, 9, 0);
+    lv_obj_set_style_pad_column(g_toast, 10, 0);
+    lv_obj_set_size(g_toast, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(g_toast, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(g_toast, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_align(g_toast, LV_ALIGN_TOP_MID, 0, 40);
+    lv_obj_clear_flag(g_toast, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *dot = lv_obj_create(g_toast); lv_obj_remove_style_all(dot);          /* the accent disc */
+    lv_obj_set_size(dot, 24, 24); lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(dot, TC(ACCENT_PRIMARY), 0); lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(dot, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    if(icon && !strcmp(icon, LV_SYMBOL_OK)){                                     /* a tick */
+        static const lv_point_precise_t CK[3] = { { 7, 12 }, { 11, 16 }, { 18, 8 } };
+        lv_obj_t *l = lv_line_create(dot); lv_line_set_points(l, CK, 3);
+        lv_obj_set_style_line_width(l, 2, 0); lv_obj_set_style_line_rounded(l, true, 0); lv_obj_set_style_line_color(l, TC(ON_ACCENT), 0);
+    } else if(icon && !strcmp(icon, LV_SYMBOL_LIST)){                            /* three short lines: the queue */
+        static const lv_point_precise_t L3[3][2] = { { { 7, 8 }, { 17, 8 } }, { { 7, 12 }, { 17, 12 } }, { { 7, 16 }, { 14, 16 } } };
+        for(int k = 0; k < 3; k++){ lv_obj_t *l = lv_line_create(dot); lv_line_set_points(l, L3[k], 2);
+            lv_obj_set_style_line_width(l, 2, 0); lv_obj_set_style_line_rounded(l, true, 0); lv_obj_set_style_line_color(l, TC(ON_ACCENT), 0); }
+    } else {                                                                     /* a small dot */
+        lv_obj_t *c = lv_obj_create(dot); lv_obj_remove_style_all(c); lv_obj_set_size(c, 8, 8); lv_obj_center(c);
+        lv_obj_set_style_radius(c, LV_RADIUS_CIRCLE, 0); lv_obj_set_style_bg_color(c, TC(ON_ACCENT), 0); lv_obj_set_style_bg_opa(c, LV_OPA_COVER, 0);
+    }
+    char top[160], sub[160]; snprintf(top, sizeof top, "%s", msg); sub[0] = 0;
+    for(char *c = top; *c; c++){                                                 /* lower case, as the rest of Zune */
+        if(*c >= 'A' && *c <= 'Z' && (c == top || c[-1] == ' ') && !(c[1] >= 'A' && c[1] <= 'Z')) *c += 32; }
+    char *sp = strstr(top, " - "); int sl = 3;
+    if(!sp){ sp = strstr(top, " \xC2\xB7 "); sl = 4; }
+    if(sp){ snprintf(sub, sizeof sub, "%s", sp + sl); *sp = 0; }
+    lv_obj_t *col = lv_obj_create(g_toast); lv_obj_remove_style_all(col);
+    lv_obj_set_size(col, LV_SIZE_CONTENT, LV_SIZE_CONTENT); lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_clear_flag(col, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *t = lv_label_create(col); lv_label_set_text(t, top); lv_label_set_long_mode(t, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_max_width(t, 190, 0); lv_obj_set_width(t, LV_SIZE_CONTENT);
+    lv_obj_set_style_text_font(t, zune_font(&font_zune_regular_14), 0); lv_obj_set_style_text_color(t, TC(TEXT_PRIMARY), 0);
+    if(sub[0]){ lv_obj_t *s2 = lv_label_create(col); lv_label_set_text(s2, sub); lv_label_set_long_mode(s2, LV_LABEL_LONG_DOT);
+        lv_point_t sz; lv_text_get_size(&sz, sub, zune_font(&font_zune_regular_12), 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        lv_obj_set_width(s2, sz.x + 2 < 190 ? sz.x + 2 : 190);
+        lv_obj_set_style_text_font(s2, zune_font(&font_zune_regular_12), 0); lv_obj_set_style_text_color(s2, TC(TEXT_MUTED), 0); }
 }

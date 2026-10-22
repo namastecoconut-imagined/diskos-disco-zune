@@ -37,6 +37,13 @@
 > a power cut, a bad cable or an interrupted flash can leave it unbootable. Back up your music and keep the
 > saved stock image somewhere safe before you start. Not affiliated with FiiO, Snowsky or Ingenic.
 
+> [!TIP]
+> **This fork adds Zune**, a Metro-style theme with big lowercase type, looping round dials, USB-C audio in
+> Working mode and more. See **[docs/ZUNE.md](docs/ZUNE.md)** for screenshots, how to build and sign it with
+> your own key, and how to switch to it. Everything below is the upstream diskOS Disco! README.
+
+<p align="center"><img src="docs/zune/screens/gallery.png" width="800" alt="Zune theme"></p>
+
 ## New in 2.6.1
 
 **Fixes Bluetooth headphones dropping mid-song**, and the Disc powering off in Bluetooth DAC mode or while plugged in. 2.6.0 brought smoother fast skipping, a steadier Bluetooth

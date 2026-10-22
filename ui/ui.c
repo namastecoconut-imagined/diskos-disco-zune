@@ -137,7 +137,7 @@ static int imm_same_track(const track_state_t *st){
     return st->have_track&&!strcmp(st->path,imm_drag_track.path)&&!strcmp(st->title,imm_drag_track.title)&&
         !(st->pos_id>0&&imm_drag_track.pos_id>0&&st->pos_id!=imm_drag_track.pos_id);
 }
-static int imm_control_enabled(void){return simple_cfg_get_int("imm_scrub",0)!=0;}
+static int imm_control_enabled(void){return th_zune() || simple_cfg_get_int("imm_scrub",0)!=0;}   /* Zune: drag round to scrub (Figma 13.3) */
 int ui_imm_volume_mode(void){return fsart_on && screen_current()==SCR_NOWPLAYING && imm_control_enabled() && simple_cfg_get_int("imm_scrub_action",0)==1;}
 static int imm_vol_last = -1;
 static lv_color_t np_acc; static int np_acc_set; static char np_acc_path[520];
@@ -229,7 +229,9 @@ static void set_label_text_changed(lv_obj_t *obj, const char *txt)
 
 /* Shared hold-to-seek readout, also used over Immersive. No idle timer. */
 static lv_obj_t *seek_preview,*seek_preview_time,*seek_preview_total;
+static void zi_scrub(long pos, long dur, int on);
 void ui_seek_preview(long position,long duration,int on){
+    if(th_zune() && fsart_on){ zi_scrub(position, duration, on); return; }   /* Zune: its big timestamp over the record */
     if(!on || duration<=0){if(seek_preview)lv_obj_add_flag(seek_preview,LV_OBJ_FLAG_HIDDEN);return;}
     if(!seek_preview){
         seek_preview=lv_obj_create(lv_layer_top());lv_obj_remove_style_all(seek_preview);
@@ -320,9 +322,16 @@ static int32_t seek_pt_to_value(int x, int y){
 }
 
 /* press: returns 1 if this touch could be a seek (and arms the recognizer) */
+/* Zune: the knob (dot) sits on the full rim at the shown progress; a press within ~40 px of it grabs it, even at the top */
+static int zune_near_knob(int x, int y){
+    if(!ring) return 0;
+    double a = (270.0 + lv_arc_get_value(ring) * 0.36) * 0.0174533;
+    double kx = 180 + 176 * cos(a), ky = 180 + 176 * sin(a), dx = x - kx, dy = y - ky;
+    return dx*dx + dy*dy <= 40.0 * 40.0;
+}
 int ui_np_seek_press(int x, int y){
     g_seek_cand = 0; g_seek_on = 0; g_scrubbing = 0;   /* also clears a stuck scrub from a missed release */
-    if(y < 40) return 0;                          /* top drawer zone */
+    if(y < 40 && !(th_zune() && zune_near_knob(x, y))) return 0;   /* top drawer zone (Zune: unless the press is on the dot) */
     if(g_track_dur <= 0) return 0;                /* nothing to seek */
     if(!seek_on_band(x, y, g_tol_grab)) return 0;  /* not on the ring (grab band) */
     if(!g_seek_bar && seek_rel_angle(x, y) > g_arc_sweep) return 0;/* in the bottom gap (transport buttons), not the arc */
@@ -339,8 +348,16 @@ int ui_np_seek_move(int x, int y){
         g_seek_cand = 0; return 0;
     }
     if(!g_seek_on){
-        if(adx < 26 && ady < 26) return 0;            /* not enough travel to classify; hold the arc */
-        if(!g_seek_bar && adx > ady*2){ g_seek_cand = 0; return 0; } /* straight horizontal -> nav swipe (top-of-arc is ambiguous; bias to no-glitch) */
+        if(adx < 20 && ady < 20) return 0;            /* not enough travel to classify; hold the arc */
+        if(th_zune()){                                /* Zune: a seek moves ALONG the rim; a drag toward or away from the
+                                                       * centre is a swipe (back, hub, drawer) and is left to them */
+            float rx = (float)(g_seek_sx - RING_CX), ry = (float)(g_seek_sy - RING_CY), rl = sqrtf(rx*rx + ry*ry);
+            if(rl > 1.0f){
+                float rad = fabsf(((float)dx*rx + (float)dy*ry) / rl), tan = fabsf(((float)dx*ry - (float)dy*rx) / rl);
+                if(rad > tan * 0.8f){ g_seek_cand = 0; return 0; }
+            }
+        }
+        if(!g_seek_bar && !th_zune() && adx > ady*2){ g_seek_cand = 0; return 0; } /* straight horizontal -> nav swipe (top-of-arc is ambiguous; bias to no-glitch). Zune: the rim is the whole ring, so a drag along its top or bottom is horizontal and still a seek; a nav swipe leaves the band instead */
         g_seek_on = 1; g_scrubbing = 1;               /* confirmed: a deliberate ring drag */
         g_scrub_lo = g_seek_lo; g_scrub_hi = g_seek_hi;   /* latch the window NOW so it can't shift under the finger */
         if(g_scrub_hi <= g_scrub_lo){ g_scrub_lo = 0; g_scrub_hi = g_track_dur; }
@@ -716,8 +733,10 @@ static void imm_overlay_mode(int baked){
     for(int j = 0; j < 3; j++) if(imm_lyr[j]) lv_obj_set_style_opa(imm_lyr[j], op, 0);
     if(!baked){ imm_record_set_overlays(NULL, 0); imm_record_set_ring(0, 0, 0, 0); }
 }
+static int g_zi_ctl_on;                                   /* Zune: its controls are up (lyrics step aside) */
 static void imm_overlays_refresh(void){
     if(!imm_fast) return;
+    if(g_zi_ctl_on){ imm_record_set_overlays(NULL, 0); return; }
     imm_overlay_t ov[4]; int n = 0;
     for(int k = 0; k < 4; k++){ if(imm_snap[k]){ lv_draw_buf_destroy(imm_snap[k]); imm_snap[k] = NULL; } }
     lv_obj_t *src[4] = { imm_lyr[0], imm_lyr[1], imm_lyr[2], imm_hint };
@@ -1014,8 +1033,12 @@ static void imm_tick(lv_timer_t *t){
         lv_anim_set_duration(&slide,240);lv_anim_set_path_cb(&slide,lv_anim_path_ease_out);lv_anim_start(&slide);
     }
 }
+static lv_obj_t *g_zi_dim, *g_zi_ctl; static lv_timer_t *g_zi_tm;   /* the Zune immersive layer (below) */
+static void zi_controls(int on); static void zi_tick(lv_timer_t *t); static void zi_scrub(long pos, long dur, int on);
 void ui_np_fsart_open(void){
     if(!fsart || fsart_on || !g_np_have) return;       /* nothing to show if no track */
+    if(th_zune() && g_zi_dim){ zi_controls(0); zi_scrub(0, 0, 0);
+                               if(!g_zi_tm) g_zi_tm = lv_timer_create(zi_tick, 500, NULL); }   /* Zune: its layer starts hidden */
     lv_anim_delete(fsart, NULL);lv_anim_delete(&imm_out_tag,NULL); /* reopening cancels every previous close callback */
     imm_fast = 0;imm_frame_period=41;imm_record_set_smoothing(1);imm_overlay_mode(0);
     if(imm_scrim) lv_obj_remove_flag(imm_scrim,LV_OBJ_FLAG_HIDDEN);
@@ -1115,7 +1138,128 @@ static void imm_out_done(lv_anim_t *a){
     if(fsart) lv_obj_add_flag(fsart, LV_OBJ_FLAG_HIDDEN);imm_cold_release();
 }
 static void fsart_hidden_cb(lv_anim_t *a){ (void)a; if(!fsart_on){if(fsart)lv_obj_add_flag(fsart,LV_OBJ_FLAG_HIDDEN);imm_cold_release();} }
+/* ---- Zune immersive (Figma 13, over the spinning record): the record turns as in every theme, with the hairline ring
+ * on the whole rim. A tap dims it and brings in the title, transport, times, format and a lyrics on/off switch (gone
+ * again after 3 s); dragging round the record scrubs, with the big timestamp in the middle. ---- */
+LV_FONT_DECLARE(font_zune_light_28)
+LV_FONT_DECLARE(font_zune_light_72)
+const lv_font_t *zune_font(const lv_font_t *base);
+static lv_obj_t *g_zfmt;                                 /* (the Now Playing format line, defined below) */
+static lv_obj_t *g_zi_dim, *g_zi_ctl, *g_zi_title, *g_zi_artist, *g_zi_pp, *g_zi_times, *g_zi_fmt, *g_zi_lyr, *g_zi_big, *g_zi_of;
+static lv_timer_t *g_zi_tm;
+static uint32_t g_zi_ctl_at;
+static lv_point_t g_zi_p0;
+static void zi_lyrics_shown(int on){                       /* the record's lyric lines step aside under the controls */
+    if(imm_fast){ if(on) imm_overlays_refresh(); else imm_record_set_overlays(NULL, 0); imm_render_frame(); if(imm_spin) lv_obj_invalidate(imm_spin); }
+    else for(int j = 0; j < 3; j++) if(imm_lyr[j]) lv_obj_set_style_opa(imm_lyr[j], on ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+}
+static void zi_lyr_paint(void){
+    if(!g_zi_lyr) return;
+    int on = simple_cfg_get_int("imm_lyrics", 1) != 0;
+    lv_label_set_text(g_zi_lyr, on ? "lyrics on" : "lyrics off");
+    lv_obj_set_style_text_color(g_zi_lyr, on ? TC(ACCENT_PRIMARY) : TC(FIXED_MEDIA_WHITE), 0);
+    lv_obj_set_style_text_opa(g_zi_lyr, on ? LV_OPA_COVER : 153, 0);
+}
+static void zi_controls(int on){
+    if(!g_zi_dim) return;
+    if(on == g_zi_ctl_on && on){ g_zi_ctl_at = lv_tick_get(); return; }
+    g_zi_ctl_on = on; g_zi_ctl_at = lv_tick_get();
+    lv_obj_set_style_bg_opa(g_zi_dim, on ? 173 : 0, 0);                       /* 68% */
+    if(on){ lv_obj_remove_flag(g_zi_ctl, LV_OBJ_FLAG_HIDDEN); zi_lyr_paint(); } else lv_obj_add_flag(g_zi_ctl, LV_OBJ_FLAG_HIDDEN);
+    zi_lyrics_shown(!on);
+}
+static void zi_tick(lv_timer_t *t){
+    (void)t; if(!fsart_on || !g_zi_ctl) return;
+    if(!g_zi_ctl_on) return;
+    track_state_t st; ipc_get_state(&st);
+    char a[16], b[16], tb[48]; mmss(st.position_ms, a, sizeof a); mmss(st.duration_ms, b, sizeof b);
+    snprintf(tb, sizeof tb, "%s  /  %s", a, b); set_label_text_changed(g_zi_times, tb);
+    set_label_text_changed(g_zi_title, st.title[0] ? st.title : ""); set_label_text_changed(g_zi_artist, st.artist);
+    set_label_text_changed(g_zi_fmt, g_zfmt ? lv_label_get_text(g_zfmt) : "");
+    set_label_text_changed(g_zi_pp, ui_is_playing() ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+    if(lv_tick_elaps(g_zi_ctl_at) > 3000) zi_controls(0);                     /* hide after 3 s */
+}
+static void zi_cmd_cb(lv_event_t *e){ ui_transport_command((const char *)lv_event_get_user_data(e)); g_zi_ctl_at = lv_tick_get(); zi_tick(NULL); }
+static void zi_lyr_cb(lv_event_t *e){
+    (void)e; int on = simple_cfg_get_int("imm_lyrics", 1) != 0;
+    simple_cfg_set_int("imm_lyrics", !on); ui_imm_style_apply();           /* the record's lyrics follow at once */
+    zi_lyr_paint(); g_zi_ctl_at = lv_tick_get(); zi_lyrics_shown(0);
+}
+static lv_obj_t *zi_btn(lv_obj_t *par, const char *glyph, int x, int d, const char *cmd, const char *action, int ring){
+    lv_obj_t *b = lv_button_create(par); lv_obj_remove_style_all(b);
+    lv_obj_set_size(b, d, d); lv_obj_align(b, LV_ALIGN_TOP_MID, x, 166 - d / 2);
+    if(ring){ lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, 0); lv_obj_set_style_border_width(b, 2, 0);
+              lv_obj_set_style_border_color(b, TC(FIXED_MEDIA_WHITE), 0); }
+    lv_obj_t *l = lv_label_create(b); lv_label_set_text(l, glyph);
+    lv_obj_set_style_text_font(l, TF(UI_24), 0); lv_obj_set_style_text_color(l, TC(FIXED_MEDIA_WHITE), 0); lv_obj_center(l);
+    ui_on(b, zi_cmd_cb, LV_EVENT_CLICKED, (void *)cmd, action, UI_CORE);
+    return l;
+}
+static void zi_scrub(long pos, long dur, int on){          /* Figma 13.3: the cover dims further, a big timestamp */
+    if(!g_zi_big) return;
+    if(!on || dur <= 0){
+        lv_obj_add_flag(g_zi_big, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(g_zi_of, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_bg_opa(g_zi_dim, g_zi_ctl_on ? 173 : 0, 0); return;
+    }
+    if(g_zi_ctl_on) zi_controls(0);
+    if(pos < 0) pos = 0; if(pos > dur) pos = dur;
+    char a[16], b[24], w[16]; mmss(pos, a, sizeof a); mmss(dur, w, sizeof w); snprintf(b, sizeof b, "of %s", w);
+    set_label_text_changed(g_zi_big, a); set_label_text_changed(g_zi_of, b);
+    lv_obj_set_style_bg_opa(g_zi_dim, 204, 0);                                /* 80% */
+    lv_obj_remove_flag(g_zi_big, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(g_zi_of, LV_OBJ_FLAG_HIDDEN);
+}
+static lv_obj_t *zi_label(lv_obj_t *par, const lv_font_t *f, lv_color_t c, int w, int y){
+    lv_obj_t *l = lv_label_create(par); lv_label_set_text(l, "");
+    if(w > 0){ lv_obj_set_width(l, w); lv_label_set_long_mode(l, LV_LABEL_LONG_DOT); }
+    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(l, f, 0); lv_obj_set_style_text_color(l, c, 0);
+    lv_obj_align(l, LV_ALIGN_TOP_MID, 0, y); lv_obj_remove_flag(l, LV_OBJ_FLAG_CLICKABLE);
+    return l;
+}
+static void zune_imm_build(lv_obj_t *fs){                  /* once, on top of the record's layers */
+    imm_record_set_ring_full(1);                           /* the baked ring: the whole rim */
+    for(int j = 0; j < 3; j++) if(imm_lyr[j]){              /* the record's lyric lines in Open Sans Light */
+        const lv_font_t *f = zune_font(j == 1 ? TF(UI_24) : TF(UI_18));
+        lv_obj_set_style_text_font(imm_lyr[j], f, 0);
+        lv_obj_set_style_max_height(imm_lyr[j], (j == 1 ? 4 : 2) * lv_font_get_line_height(f), 0);
+    }
+    if(imm_hint){ lv_obj_set_style_text_font(imm_hint, TF(UI_14), 0); lv_label_set_text(imm_hint, "no synced lyrics for this song"); }
+    if(imm_prog){ lv_obj_set_size(imm_prog, 352, 352); lv_obj_center(imm_prog);   /* (the plain renderer's ring, the same) */
+                  lv_arc_set_rotation(imm_prog, 270); lv_arc_set_bg_angles(imm_prog, 0, 360); }
+    g_zi_dim = lv_obj_create(fs); lv_obj_remove_style_all(g_zi_dim); lv_obj_set_size(g_zi_dim, 360, 360);
+    lv_obj_set_style_bg_color(g_zi_dim, TC(FIXED_MEDIA_BLACK), 0); lv_obj_set_style_bg_opa(g_zi_dim, 0, 0);
+    lv_obj_remove_flag(g_zi_dim, LV_OBJ_FLAG_CLICKABLE);
+    g_zi_ctl = lv_obj_create(fs); lv_obj_remove_style_all(g_zi_ctl); lv_obj_set_size(g_zi_ctl, 360, 360);
+    lv_obj_remove_flag(g_zi_ctl, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    g_zi_title  = zi_label(g_zi_ctl, zune_font(&font_zune_light_28), TC(FIXED_MEDIA_WHITE), 280, 72);
+    lv_obj_set_style_text_letter_space(g_zi_title, -1, 0);
+    g_zi_artist = zi_label(g_zi_ctl, TF(MUSIC_ARTIST), TC(FIXED_MEDIA_WHITE), 260, 106);
+    zi_btn(g_zi_ctl, LV_SYMBOL_PREV, -72, 48, "0201000C0002", "imm.zune.prev", 0);
+    g_zi_pp = zi_btn(g_zi_ctl, LV_SYMBOL_PAUSE, 0, 64, "0201000C0000", "imm.zune.pp", 1);
+    zi_btn(g_zi_ctl, LV_SYMBOL_NEXT, 72, 48, "0201000C0001", "imm.zune.next", 0);
+    g_zi_times = zi_label(g_zi_ctl, TF(UI_12), TC(FIXED_MEDIA_WHITE), 0, 216);
+    lv_obj_set_style_text_letter_space(g_zi_times, 1, 0);
+    g_zi_fmt = zi_label(g_zi_ctl, TF(UI_10), TC(ACCENT_PRIMARY), 0, 240);
+    lv_obj_set_style_text_letter_space(g_zi_fmt, 1, 0);
+    g_zi_lyr = zi_label(g_zi_ctl, TF(UI_14), TC(ACCENT_PRIMARY), 0, 268);      /* lyrics on / off */
+    lv_obj_add_flag(g_zi_lyr, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_ext_click_area(g_zi_lyr, 14);
+    ui_on(g_zi_lyr, zi_lyr_cb, LV_EVENT_CLICKED, NULL, "imm.zune.lyrics", UI_REACHABLE);
+    lv_obj_add_flag(g_zi_ctl, LV_OBJ_FLAG_HIDDEN);
+    g_zi_big = zi_label(fs, &font_zune_light_72, TC(FIXED_MEDIA_WHITE), 0, 118);
+    lv_obj_set_style_text_letter_space(g_zi_big, -3, 0);
+    g_zi_of = zi_label(fs, TF(UI_14), TC(FIXED_MEDIA_WHITE), 0, 204);
+    lv_obj_set_style_text_opa(g_zi_of, 153, 0);
+    lv_obj_add_flag(g_zi_big, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(g_zi_of, LV_OBJ_FLAG_HIDDEN);
+}
+void ui_zune_imm_preview(int state, int v){         /* desktop previews only: show state 2 / 3 without a touch */
+    ui_np_fsart_open(); if(!fsart_on) return;
+    if(state == 2){ zi_controls(1); zi_tick(NULL); }
+    if(state == 3){ track_state_t st; ipc_get_state(&st); zi_scrub((long)((long long)v * st.duration_ms / 1000), st.duration_ms, 1); }
+}
 void ui_np_fsart_close(void){
+    if(g_zi_tm){ lv_timer_delete(g_zi_tm); g_zi_tm = NULL; }
+    if(th_zune() && g_zi_dim){ zi_scrub(0, 0, 0); if(g_zi_ctl_on){ g_zi_ctl_on = 0; lv_obj_add_flag(g_zi_ctl, LV_OBJ_FLAG_HIDDEN);
+                                                                     lv_obj_set_style_bg_opa(g_zi_dim, 0, 0); } }
     lv_anim_delete(&imm_lyric_slide_tag,NULL);imm_record_set_lyric_offset(0);
     if(!fsart || !fsart_on) return;
     imm_control_reset();fsart_on = 0;imm_volume_input_restore();
@@ -1184,6 +1328,11 @@ static void imm_control_sample(lv_point_t p){
 }
 static void fsart_click_cb(lv_event_t *e){
     lv_event_code_t c=lv_event_get_code(e);
+    if(th_zune() && g_zi_dim){                         /* Zune: a still tap shows / hides the controls (Figma 13.2) */
+        lv_indev_t *zin = lv_indev_active(); lv_point_t zp = { 0, 0 }; if(zin) lv_indev_get_point(zin, &zp);
+        if(c == LV_EVENT_PRESSED) g_zi_p0 = zp;
+        if(c == LV_EVENT_CLICKED){ if(abs(zp.x - g_zi_p0.x) < 16 && abs(zp.y - g_zi_p0.y) < 16 && g_zi_p0.x > 24) zi_controls(!g_zi_ctl_on); return; }
+    }
     if(!imm_control_enabled()){if(c==LV_EVENT_CLICKED)ui_np_fsart_close();return;}
     if(c==LV_EVENT_CLICKED)return; /* Left-edge back gesture replaces exit-on-tap. */
     lv_indev_t *in=lv_indev_active();if(!in)return;lv_point_t p;lv_indev_get_point(in,&p);
@@ -1229,6 +1378,7 @@ static void np_mid_cb(lv_event_t *e){              /* Poster: the title opens th
     (void)e;
     track_state_t st; ipc_get_state(&st);
     if(!st.have_track){ screen_show(SCR_LIBRARY); return; }
+    if(th_zune()){ screen_show(SCR_NPMENU); return; }    /* Zune: the title opens the actions menu (album is one of them) */
     if(st.album[0])       library_open_album_focus(st.album, st.artist, g_np_curpath);
     else if(st.artist[0]) library_open_artist(st.artist);
     screen_show(SCR_LIBRARY);
@@ -1246,14 +1396,25 @@ void ui_np_open_artist(void){                      /* Disco title popup: Artist,
     library_open_artist_focus(st.artist, st.album);
     screen_show(SCR_LIBRARY);
 }
+#define ZNP_RIM_IN 132                                   /* Zune: the rim band starts this far from the centre */
+static int g_zcover_rim;
+static int zune_on_rim(int x, int y){ int dx = x - 180, dy = y - 180; return dx*dx + dy*dy >= ZNP_RIM_IN*ZNP_RIM_IN; }
 int ui_np_cover_hit(int x, int y){   /* main.c: a press on the (visible) cover is a cover tap, not a seek */
     if(!cover || lv_obj_has_flag(cover, LV_OBJ_FLAG_HIDDEN)) return 0;
     lv_area_t a; lv_obj_get_coords(cover, &a);
+    if(th_zune() && zune_on_rim(x, y)) return 0;   /* Zune: the cover runs under the rim; the rim is the seek ring */
     return x >= a.x1 && x <= a.x2 && y >= a.y1 && y <= a.y2;
 }
 static void cover_click_cb(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);
+    if(th_zune()){                                     /* Zune: a press on the rim part of the cover is a seek */
+        lv_indev_t *zi = lv_indev_active(); lv_point_t zp;
+        if(zi){ lv_indev_get_point(zi, &zp);
+                if(code == LV_EVENT_PRESSED){ g_zcover_rim = zune_on_rim(zp.x, zp.y); g_cover_px = zp.x; g_cover_py = zp.y; }
+                else if(code == LV_EVENT_CLICKED && (abs(zp.x - g_cover_px) > 20 || abs(zp.y - g_cover_py) > 20)) return; }   /* a swipe, not a tap: the swipe decides */
+        if(g_zcover_rim) return;
+    }
     if(code == LV_EVENT_CLICKED && g_np_ring){ ui_np_fsart_open(); return; }   /* Ring: artwork -> immersive */
     lv_indev_t *id = lv_indev_active();
     if(code == LV_EVENT_PRESSED) {
@@ -1286,10 +1447,18 @@ static void np_accent_from_track(const char *path){
     if(!path[0])np_acc_set=0;
 }
 int ui_accent_is_static(void);   /* fork: a colour picked in Accent wins over the album colour everywhere */
-static lv_color_t np_col(void){ if(th_braun()) return TC(ACCENT_PRIMARY); return ((g_np_poster || g_np_ring) && np_acc_set && !ui_accent_is_static()) ? np_acc : accent; }
-lv_color_t ui_media_accent(void){ if(th_simple())return TC(ACCENT_PRIMARY); if(th_braun()) return TC(ACCENT_PRIMARY); return (np_acc_set && !ui_accent_is_static()) ? np_acc : accent; }   /* theme.h: media surfaces (Braun: orange) */
+static _Atomic int g_zart;       /* Zune: now playing takes its accent from the album art (cfg zune_accent_art) */
+void ui_zune_art_sync(void){ g_zart = cfg_get_int("zune_accent_art", 0) ? 1 : 0; }
+static lv_color_t np_col(void){ if(th_zune()) return (g_zart && np_acc_set) ? np_acc : TC(ACCENT_PRIMARY);
+                                if(th_braun()) return TC(ACCENT_PRIMARY); return ((g_np_poster || g_np_ring) && np_acc_set && !ui_accent_is_static()) ? np_acc : accent; }
+lv_color_t ui_media_accent(void){ if(th_zune()) return (g_zart && np_acc_set) ? np_acc : TC(ACCENT_PRIMARY); if(th_simple())return TC(ACCENT_PRIMARY); if(th_braun()) return TC(ACCENT_PRIMARY); return (np_acc_set && !ui_accent_is_static()) ? np_acc : accent; }   /* theme.h: media surfaces (Braun: orange) */
 static void apply_accent(void)
 {
+    if(th_zune()){                                    /* Zune: the format lines and the knob follow the album too */
+        if(g_zi_fmt) lv_obj_set_style_text_color(g_zi_fmt, np_col(), 0);
+        if(g_zfmt) lv_obj_set_style_text_color(g_zfmt, np_col(), 0);
+        if(ring) lv_obj_set_style_bg_color(ring, np_col(), LV_PART_KNOB);
+    }
     if(ring) {
         lv_obj_set_style_arc_color(ring, np_col(), LV_PART_INDICATOR);
     }
@@ -1304,7 +1473,7 @@ static void apply_accent(void)
         lv_obj_set_style_bg_color(btn_pp, np_col(), 0);
         lv_obj_set_style_text_color(btn_pp, theme_on_color(np_col()), 0);
     } else if(btn_pp) {
-        lv_obj_set_style_text_color(btn_pp, th_braun() ? TC(ON_ACCENT) : np_col(), LV_PART_MAIN);   /* Braun: white on the orange button */
+        lv_obj_set_style_text_color(btn_pp, th_braun() ? TC(ON_ACCENT) : th_zune() ? TC(TEXT_PRIMARY) : np_col(), LV_PART_MAIN);   /* Braun: white on the orange button */
     }
 
     if(fav_icon && g_np_fav) {
@@ -1343,7 +1512,7 @@ lv_color_t ui_disco_fit_accent(lv_color_t c){
     }
     return c;
 }
-lv_color_t ui_current_accent(void){ if(th_simple() || th_null())return TC(ACCENT_PRIMARY); return th_braun() ? TC(ACCENT_PRIMARY) : ui_disco_fit_accent(accent); }   /* Braun: orange everywhere */
+lv_color_t ui_current_accent(void){ if(th_simple() || th_null() || th_zune())return TC(ACCENT_PRIMARY); return th_braun() ? TC(ACCENT_PRIMARY) : ui_disco_fit_accent(accent); }   /* Braun: orange everywhere */
 
 /* ---- shared standard header (back chevron + centred title) ------------------------------------- */
 static void ui_header_home_cb(lv_event_t *e){ if(lv_event_get_code(e)==LV_EVENT_CLICKED && screen_press_was_long()) screen_home(); }
@@ -1465,7 +1634,7 @@ static void fav_refresh(int on, int have)
 {
     g_np_fav = on; g_np_have = have;
     if(!btn_fav || !fav_icon) return;
-    if(have) lv_obj_remove_flag(btn_fav, LV_OBJ_FLAG_HIDDEN);
+    if(have && !th_zune()) lv_obj_remove_flag(btn_fav, LV_OBJ_FLAG_HIDDEN);   /* Zune: Favourite lives in the hub */
     else     lv_obj_add_flag(btn_fav, LV_OBJ_FLAG_HIDDEN);
     lv_label_set_text(fav_icon, HEART_FILLED);                     /* theme: solid, colour carries the state */
     lv_obj_set_style_text_color(fav_icon, on ? np_col() : th_braun() ? TC(TEXT_SECONDARY) : (g_np_poster || g_np_ring) ? TC(TEXT_PRIMARY) : TC(TEXT_MUTED), LV_PART_MAIN);
@@ -1539,6 +1708,10 @@ static void mode_click_cb(lv_event_t *e)
     }
 }
 
+void ui_np_set_playmode(int wm){                      /* Zune's play-mode list: set one mode directly */
+    if(wm < 0 || wm >= WORKMODE_COUNT) return;
+    simple_cfg_set_int("work_mode", wm); ui_set_workmode(wm); mode_refresh(wm);
+}
 static int g_np_vinyl = 0;
 static int g_spinning  = 0;
 
@@ -1571,6 +1744,10 @@ void ui_vinyl_spin(int want)
 static void np_layout(int poster);
 static void np_layout_ring(int on);
 void kit_fork_np_braun(void);
+void kit_fork_np_zune(void);
+static void zune_title_fit_text(const char *t);
+static void zune_album_fit(const char *t);
+static void zune_idle(int idle);
 static lv_timer_t *g_settle_t;
 static void np_settle_cb(lv_timer_t *t){                  /* after 15 s: stop scrolling, end with "..." */
     (void)t;
@@ -1582,7 +1759,7 @@ static void np_settle_cb(lv_timer_t *t){                  /* after 15 s: stop sc
  * redraws its strip ~30x/s for as long as the screen is on. */
 static void queue_click_cb(lv_event_t *e){ (void)e; queue_open(); }
 static void queue_long_cb(lv_event_t *e){ (void)e; if(simple_cfg_get_int("up_next",0)) screen_show(SCR_UPNEXT); else queue_open(); }
-static void np_queue_place(void){ if(btn_queue && btn_mode) lv_obj_align_to(btn_queue, btn_mode, LV_ALIGN_OUT_BOTTOM_MID, 0, 0); }
+static void np_queue_place(void){ if(btn_queue && btn_mode) lv_obj_align_to(btn_queue, btn_mode, th_zune() ? LV_ALIGN_OUT_RIGHT_MID : LV_ALIGN_OUT_BOTTOM_MID, 0, 0); }
 void ui_queue_changed(void){                                  /* the badge: the queue's size, hidden when empty */
     if(!queue_badge) return;
     int n = queue_count();
@@ -1595,6 +1772,7 @@ void ui_queue_changed(void){                                  /* the badge: the 
 void ui_np_tags_changed(void){ lyrics_invalidate_current(); g_lyr_n = -1; g_lyr_path[0] = 0; }   /* immersive re-reads the new lyrics */
 void ui_np_rescroll(void){
     ui_queue_changed();                                       /* Now Playing shown: the queue's count */
+    if(th_zune()) return;                                 /* Zune: one or two lines, then "...", no scroll */
     if(!title || g_np_poster) return;                     /* the Poster wraps its title instead */
     lv_label_set_long_mode(title, LV_LABEL_LONG_SCROLL_CIRCULAR);
     if(g_np_ring && artist) lv_label_set_long_mode(artist, LV_LABEL_LONG_SCROLL_CIRCULAR);
@@ -1724,6 +1902,233 @@ void kit_fork_np_braun(void){
     if(mode_icon && g_np_mode == 0) lv_obj_set_style_text_color(mode_icon, TC(TEXT_SECONDARY), 0);
     if(btn_queue){ for(uint32_t k = 0; k < lv_obj_get_child_count(btn_queue); k++){ lv_obj_t *c = lv_obj_get_child(btn_queue, k);
                      if(lv_obj_check_type(c, &lv_label_class) && lv_obj_get_child_count(c) == 0 && k == 0) lv_obj_set_style_text_color(c, TC(TEXT_SECONDARY), 0); } }
+}
+/* Zune Now Playing: the cover as a square bleeding off the left edge, the track as a left-aligned column beside it
+ * (SemiBold title, artist, album, times), the progress as a thin ring hugging the whole rim from 12 o'clock with a
+ * magenta knob (drag along the rim to seek), and Previous / play-pause (a ring button) / Next low in the centre.
+ * Favourite and play mode sit small in the column under the times. Runs after Ring's layout, like Braun's. */
+#define ZNP_COL_X  166
+#define ZNP_COL_W  130
+#define ZNP_ART    192
+#define ZNP_ROW_Y  296                                    /* the transport row's centre line */
+#define ZNP_TOP    14                                     /* everything above the transport sits this much lower than Figma 10 */
+#define ZNP_SIDE_DX 70
+/* the column follows the title: one line or two, the artist sits right under it */
+static int g_zcol_hooked;
+static int g_zidle;                                       /* nothing-playing state (below) */
+static lv_obj_t *g_zshuf, *g_zbrowse;
+static lv_obj_t *g_zfmt;                                 /* "FLAC · 96 kHz" */
+static lv_obj_t *g_zstat;                                /* time + battery */
+void zhome_status_text(char *b, size_t n);               /* zune_home.c */
+void ui_np_status_changed(void);
+lv_obj_t *zune_status(lv_obj_t *root, int scr); void zune_status_refresh(void);
+void ui_np_status_changed(void){ zune_status_refresh(); }   /* zune_home.c: the clock or battery changed */
+static void zune_fmt_update(const track_state_t *st){
+    if(!g_zfmt) return;
+    char b[48] = "";
+    if(st && st->have_track){
+        const char *dot = strrchr(st->path, '.'); char ext[8] = ""; int n = 0;
+        if(dot && !strchr(dot, '/')) for(const char *c = dot + 1; *c && n < 6; c++) ext[n++] = (char)toupper((unsigned char)*c);
+        ext[n] = 0;
+        if(st->is_dsd) snprintf(b, sizeof b, "%s%sDSD", ext, ext[0] ? " \xC2\xB7 " : "");
+        else if(st->sample_rate > 0){
+            int k = st->sample_rate / 100;           /* tenths of kHz */
+            if(k % 10) snprintf(b, sizeof b, "%s%s%d.%d kHz", ext, ext[0] ? " \xC2\xB7 " : "", k / 10, k % 10);
+            else       snprintf(b, sizeof b, "%s%s%d kHz", ext, ext[0] ? " \xC2\xB7 " : "", k / 10);
+        } else snprintf(b, sizeof b, "%s", ext);
+    }
+    if(strcmp(lv_label_get_text(g_zfmt), b)) lv_label_set_text(g_zfmt, b);
+}
+static void zune_col_chain(void){
+    if(!th_zune() || !title) return;
+    lv_obj_update_layout(title);
+    if(artist) lv_obj_align_to(artist, title, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 6);
+    lv_obj_t *prev = artist ? artist : title;
+    if(g_zidle == 1 && g_zshuf){                       /* nothing playing: the two links under the count */
+        lv_obj_update_layout(prev);
+        lv_obj_align_to(g_zshuf, prev, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 14);
+        lv_obj_update_layout(g_zshuf);
+        lv_obj_align_to(g_zbrowse, lv_obj_has_flag(g_zshuf, LV_OBJ_FLAG_HIDDEN) ? prev : g_zshuf, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 10);
+        return;
+    }
+    if(album){ lv_obj_update_layout(artist ? artist : title); lv_obj_align_to(album, prev, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 2); prev = album; }
+    if(t_elapsed){ lv_obj_update_layout(prev); lv_obj_align_to(t_elapsed, prev, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 10);
+                   if(t_sep) lv_obj_align_to(t_sep, t_elapsed, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
+                   if(t_remain && t_sep) lv_obj_align_to(t_remain, t_sep, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
+                   lv_obj_update_layout(t_elapsed);
+                   int y = lv_obj_get_y(t_elapsed) + lv_obj_get_height(t_elapsed);
+                   if(g_zfmt) lv_obj_align(g_zfmt, LV_ALIGN_TOP_LEFT, ZNP_COL_X, y + 6);
+                   }
+}
+static int g_zcol_pending;
+static void zune_col_async(void *u){ (void)u; g_zcol_pending = 0; zune_col_chain(); }
+/* the title box: as tall as its text, at most two lines, ending with "..." past that */
+static void zune_title_fit_text(const char *t){
+    if(!th_zune() || !title || !t) return;
+    const lv_font_t *f = TF(MUSIC_TITLE);
+    lv_point_t sz; lv_text_get_size(&sz, t, f, 0, 0, ZNP_COL_W, LV_TEXT_FLAG_NONE);
+    int lh = lv_font_get_line_height(f), h = sz.y > lh ? 2 * lh : lh;
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    lv_obj_set_size(title, ZNP_COL_W, h);
+    zune_col_chain(); lv_async_call(zune_col_async, NULL);
+}
+static void zune_album_fit(const char *t){
+    if(!th_zune() || !album || !t) return;
+    const lv_font_t *f = TF(UI_12);
+    lv_point_t sz; lv_text_get_size(&sz, t, f, 0, 0, ZNP_COL_W, LV_TEXT_FLAG_NONE);
+    int lh = lv_font_get_line_height(f);
+    lv_label_set_long_mode(album, LV_LABEL_LONG_DOT);
+    lv_obj_set_size(album, ZNP_COL_W, !t[0] ? 0 : sz.y > lh ? 2 * lh : lh);
+    zune_col_chain(); lv_async_call(zune_col_async, NULL);
+}
+/* nothing playing (Figma 65): the prompt, the size of the library and two ways in */
+static lv_obj_t *g_zshuf, *g_zbrowse;
+static int g_zidle = -1;
+static void zune_shuffle_all_cb(lv_event_t *e){
+    (void)e;
+    ui_np_set_playmode(1);
+    ui_play_list(1, "", 1);                              /* all songs, shuffled */
+}
+static void zune_browse_cb(lv_event_t *e){ (void)e; screen_show(SCR_LIBRARY); }
+static lv_obj_t *zune_link(const char *t, lv_color_t c, lv_event_cb_t cb, const char *action){
+    lv_obj_t *b = lv_label_create(g_np_scr); lv_label_set_text(b, t);
+    lv_obj_set_style_text_font(b, TF(UI_16), 0); lv_obj_set_style_text_color(b, c, 0);
+    lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_ext_click_area(b, 10);
+    ui_on(b, cb, LV_EVENT_CLICKED, NULL, action, UI_REACHABLE);
+    lv_obj_add_flag(b, LV_OBJ_FLAG_HIDDEN);
+    return b;
+}
+static void zune_idle(int idle){
+    if(!th_zune() || !g_np_scr || idle == g_zidle) return;
+    g_zidle = idle;
+    if(!g_zshuf){ g_zshuf = zune_link("shuffle all", TC(ACCENT_PRIMARY), zune_shuffle_all_cb, "np.zune.shuffle_all");
+                  g_zbrowse = zune_link("browse music", TC(TEXT_PRIMARY), zune_browse_cb, "np.zune.browse"); }
+    lv_obj_t *hide[] = { t_elapsed, t_sep, t_remain, g_zfmt, btn_prev, btn_pp, btn_next, album };
+    for(unsigned i = 0; i < sizeof hide / sizeof hide[0]; i++) SHOW(hide[i], !idle);
+    SHOW(g_zshuf, idle); SHOW(g_zbrowse, idle);
+    if(ring) lv_obj_set_style_opa(ring, idle ? LV_OPA_TRANSP : LV_OPA_COVER, LV_PART_KNOB);   /* idle: the track ring only */
+    if(idle){
+        static char cnt[48]; int n = mdb_total_song_count();
+        if(n >= 1000) snprintf(cnt, sizeof cnt, "%d,%03d songs on the card", n / 1000, n % 1000);
+        else if(n > 0) snprintf(cnt, sizeof cnt, "%d songs on the card", n); else snprintf(cnt, sizeof cnt, "no music on the card yet");
+        lv_label_set_text(title, "nothing playing"); zune_title_fit_text("nothing playing");
+        if(artist){ lv_label_set_text(artist, cnt); lv_obj_set_style_text_color(artist, TC(TEXT_MUTED), 0);
+                    lv_obj_set_style_text_font(artist, TF(UI_12), 0); lv_label_set_long_mode(artist, LV_LABEL_LONG_WRAP);
+                    lv_obj_set_size(artist, ZNP_COL_W, LV_SIZE_CONTENT); }
+        SHOW(g_zshuf, n > 0);
+    } else if(artist){ lv_obj_set_style_text_color(artist, TC(TEXT_PRIMARY), 0);
+                       lv_obj_set_style_text_font(artist, TF(MUSIC_ARTIST), 0); lv_label_set_long_mode(artist, LV_LABEL_LONG_DOT);
+                       lv_obj_set_size(artist, ZNP_COL_W, lv_font_get_line_height(TF(MUSIC_ARTIST))); }
+    zune_col_chain(); lv_async_call(zune_col_async, NULL);
+}
+static void zune_col_cb(lv_event_t *e){ (void)e; if(!g_zcol_pending){ g_zcol_pending = 1; lv_async_call(zune_col_async, NULL); } }   /* after the layout pass settles */
+void kit_fork_np_zune(void){
+    if(!th_zune() || !g_np_scr) return;
+    lv_color_t acc = np_col();
+    ui_np_backdrop_enabled(0);                              /* pure black: no blurred cover behind */
+    SHOW(np_dots[0], 0); SHOW(np_dots[1], 0); SHOW(album, 1); SHOW(t_sep, 1);
+    if(cover){
+        lv_obj_set_size(cover, ZNP_ART, ZNP_ART);
+        lv_obj_set_style_radius(cover, 0, LV_PART_MAIN);
+        lv_obj_align(cover, LV_ALIGN_TOP_LEFT, -46, 48 + ZNP_TOP);
+    }
+    if(cover_img){
+        lv_obj_set_size(cover_img, ZNP_ART, ZNP_ART);
+        lv_obj_center(cover_img);
+        lv_image_set_scale(cover_img, (uint32_t)(256 * ZNP_ART / CBMP));   /* the 148px decode, enlarged */
+    }
+    if(ring){
+        lv_obj_set_size(ring, 352, 352);
+        lv_obj_align(ring, LV_ALIGN_CENTER, 0, 0);
+        lv_arc_set_mode(ring, LV_ARC_MODE_NORMAL);
+        lv_arc_set_rotation(ring, 270); lv_arc_set_bg_angles(ring, 0, 360);
+        lv_obj_set_style_arc_width(ring, 3, LV_PART_MAIN);
+        lv_obj_set_style_arc_width(ring, 3, LV_PART_INDICATOR);
+        lv_obj_set_style_arc_color(ring, TC(CONTROL_TRACK), LV_PART_MAIN);
+        lv_obj_set_style_arc_color(ring, acc, LV_PART_INDICATOR);
+        lv_obj_set_style_arc_rounded(ring, false, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(ring, acc, LV_PART_KNOB);
+        lv_obj_set_style_pad_all(ring, 4, LV_PART_KNOB);
+    }
+    g_arc_rot = 270; g_arc_sweep = 360; g_arc_rev = 0;
+    g_ring_cx = 180; g_ring_cy = 180; g_ring_r = 176; g_tol_grab = 46; g_tol_wander = 70;   /* a wide band: the rim is hard to hit on round glass */
+    if(title){
+        lv_obj_set_style_text_font(title, TF(MUSIC_TITLE), 0);
+        lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_set_style_text_color(title, TC(TEXT_PRIMARY), 0);
+        if(!g_zcol_hooked){ lv_obj_add_event_cb(title, zune_col_cb, LV_EVENT_SIZE_CHANGED, NULL); g_zcol_hooked = 1; }
+        lv_obj_align(title, LV_ALIGN_TOP_LEFT, ZNP_COL_X, 62 + ZNP_TOP);
+        zune_title_fit_text("No Track");
+    }
+    if(artist){
+        lv_obj_set_style_text_font(artist, TF(MUSIC_ARTIST), 0);
+        lv_obj_set_style_text_align(artist, LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_set_style_text_color(artist, TC(TEXT_PRIMARY), 0);
+        lv_obj_set_size(artist, ZNP_COL_W, lv_font_get_line_height(TF(MUSIC_ARTIST)));
+        lv_label_set_long_mode(artist, LV_LABEL_LONG_DOT);
+        lv_obj_align(artist, LV_ALIGN_TOP_LEFT, ZNP_COL_X, 122);
+    }
+    if(album){
+        lv_obj_set_style_text_font(album, TF(UI_12), 0);
+        lv_obj_set_style_text_align(album, LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_set_style_text_color(album, TC(TEXT_MUTED), 0);
+        lv_label_set_long_mode(album, LV_LABEL_LONG_DOT);
+        zune_album_fit(lv_label_get_text(album));
+        lv_obj_align(album, LV_ALIGN_TOP_LEFT, ZNP_COL_X, 141);
+    }
+    if(np_mid_btn){ lv_obj_set_size(np_mid_btn, ZNP_COL_W, 112); lv_obj_align(np_mid_btn, LV_ALIGN_TOP_LEFT, ZNP_COL_X, 60 + ZNP_TOP); }
+    lv_obj_t *tm[3] = { t_elapsed, t_sep, t_remain };
+    for(int i = 0; i < 3; i++) if(tm[i]){
+        lv_obj_set_style_text_font(tm[i], TF(UI_12), 0);
+        lv_obj_set_style_text_color(tm[i], TC(TEXT_MUTED), 0);
+        lv_obj_set_width(tm[i], LV_SIZE_CONTENT);
+    }
+    if(t_elapsed) lv_obj_align(t_elapsed, LV_ALIGN_TOP_LEFT, ZNP_COL_X, 182);
+    if(t_sep && t_elapsed) lv_obj_align_to(t_sep, t_elapsed, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
+    if(t_remain && t_sep) lv_obj_align_to(t_remain, t_sep, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
+    /* favourite / sleep and play mode: small, in the column */
+    SHOW(btn_fav, 0); SHOW(btn_queue, 0); SHOW(btn_mode, 0);   /* Favourite, queue and play mode: the actions menu (tap the title) */
+    if(!g_zstat) g_zstat = zune_status(g_np_scr, SCR_NOWPLAYING);   /* time + battery (and a sleep timer) at the top */
+    if(g_zstat) lv_obj_align(g_zstat, LV_ALIGN_TOP_MID, 0, 26);   /* clear of the seek ring at the top of the rim */
+    if(cover) lv_obj_move_background(cover);                     /* the seek ring draws over the art, not under it */
+    if(!g_zfmt){
+        g_zfmt = lv_label_create(g_np_scr); lv_label_set_text(g_zfmt, "");
+        lv_obj_set_style_text_font(g_zfmt, TF(UI_10), 0);
+        lv_obj_set_style_text_letter_space(g_zfmt, 1, 0);
+        lv_obj_set_style_text_color(g_zfmt, acc, 0);
+        lv_obj_remove_flag(g_zfmt, LV_OBJ_FLAG_CLICKABLE);
+    }
+    lv_obj_t *small[3] = { btn_fav, btn_sleep, btn_mode };
+    for(int i = 0; i < 3; i++) if(small[i]) lv_obj_set_size(small[i], 30, 30);
+    lv_obj_t *icn[3] = { fav_icon, mode_icon, NULL };
+    for(int i = 0; i < 3; i++) if(icn[i]){ lv_obj_set_style_transform_scale(icn[i], 168, 0);   /* the 28px icons at ~18px */
+                                           lv_obj_set_style_transform_pivot_x(icn[i], LV_PCT(50), 0);
+                                           lv_obj_set_style_transform_pivot_y(icn[i], LV_PCT(50), 0); }
+
+    /* transport */
+    lv_color_t w = TC(TEXT_PRIMARY);
+    /* prev / play / next: three boxes on one centre line, each glyph centred in its box */
+    lv_obj_t *side[2] = { btn_prev, btn_next };
+    for(int i = 0; i < 2; i++) if(side[i]){
+        lv_obj_set_style_text_color(side[i], w, 0); lv_obj_set_style_text_font(side[i], TF(UI_20), 0);
+        lv_obj_set_size(side[i], 48, 48); lv_obj_set_style_pad_all(side[i], 0, 0);
+        lv_obj_set_style_text_align(side[i], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_pad_top(side[i], (48 - lv_font_get_line_height(TF(UI_20))) / 2, 0);
+        lv_obj_align(side[i], LV_ALIGN_CENTER, i ? ZNP_SIDE_DX : -ZNP_SIDE_DX, ZNP_ROW_Y - 180);
+    }
+    if(btn_pp){
+        lv_obj_set_style_text_font(btn_pp, TF(UI_20), 0); lv_obj_set_style_text_color(btn_pp, w, 0);
+        lv_obj_set_style_bg_opa(btn_pp, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_color(btn_pp, w, 0); lv_obj_set_style_border_width(btn_pp, 2, 0);
+        lv_obj_set_style_border_opa(btn_pp, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(btn_pp, LV_RADIUS_CIRCLE, 0); lv_obj_set_style_pad_all(btn_pp, 0, 0);
+        lv_obj_set_size(btn_pp, 52, 52); lv_obj_set_style_text_align(btn_pp, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_pad_top(btn_pp, (52 - lv_font_get_line_height(TF(UI_20))) / 2 - 1, 0);
+        lv_obj_set_style_pad_left(btn_pp, 3, 0);              /* optical centre: a play triangle reads left-heavy */
+        lv_obj_align(btn_pp, LV_ALIGN_CENTER, 0, ZNP_ROW_Y - 180);
+    }
+    zune_col_chain();
+    { track_state_t zs; ipc_get_state(&zs); if(!zs.have_track) zune_idle(1); }   /* opened with nothing loaded */
 }
 static void np_layout(int poster){
     if(!poster&&g_posterx){if(poster_img)lv_image_set_src(poster_img,NULL);lv_image_cache_drop(&g_posterxdsc);free(g_posterx);g_posterx=NULL;g_poster_baked=0;}
@@ -1997,7 +2402,7 @@ static int g_accent_gray = 0;   /* currently showing the idle/no-track neutral *
 static _Atomic int g_accent_mode = 0;   /* read by art worker/prewarm threads -> atomic */
 static uint32_t    g_accent_color = UI_RED;     /* UI-thread only */
 static uint32_t    g_static_last  = 0xFFFFFFFFu; /* last static accent actually applied (skip redundant re-applies) */
-int ui_accent_is_static(void){ return g_accent_mode == 1; }   /* worker/prewarm gate */
+int ui_accent_is_static(void){ return g_accent_mode == 1 && !(g_zart && th_zune()); }   /* Zune album-art accent: keep deriving the colour */   /* worker/prewarm gate */
 
 static void update_accent_seed(const track_state_t *st)
 {
@@ -2214,7 +2619,7 @@ static void apply_art(const art_req_t *job)
         lv_image_set_src(backdrop, backdrop_src);
         lv_obj_remove_flag(backdrop, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_background(backdrop);
-        if(g_np_poster || th_braun() || !g_np_backdrop_on) lv_obj_add_flag(backdrop, LV_OBJ_FLAG_HIDDEN);   /* the sharp poster replaces it; Braun: the grille */
+        if(g_np_poster || th_braun() || th_zune() || !g_np_backdrop_on) lv_obj_add_flag(backdrop, LV_OBJ_FLAG_HIDDEN);   /* the sharp poster replaces it; Braun: the grille */
     }
     if(job->pixels){
         g_sharp_valid = job->pixels->sharp_ok;
@@ -2417,8 +2822,8 @@ static void np_transport_glyphs(int book)
 {
     if(book == g_np_bookmode) return;
     g_np_bookmode = book;
-    lv_obj_set_style_text_font(btn_prev, book ? TF(UI_22) : TF(UI_28), LV_PART_MAIN);
-    lv_obj_set_style_text_font(btn_next, book ? TF(UI_22) : TF(UI_28), LV_PART_MAIN);
+    lv_obj_set_style_text_font(btn_prev, th_zune() ? TF(UI_20) : book ? TF(UI_22) : TF(UI_28), LV_PART_MAIN);   /* Zune: its transport row is sized for UI_20 */
+    lv_obj_set_style_text_font(btn_next, th_zune() ? TF(UI_20) : book ? TF(UI_22) : TF(UI_28), LV_PART_MAIN);   /* Zune: its transport row is sized for UI_20 */
     lv_label_set_text(btn_prev, book ? "-15" : LV_SYMBOL_PREV);
     lv_label_set_text(btn_next, book ? "+30" : LV_SYMBOL_NEXT);
 }
@@ -2975,6 +3380,7 @@ void ui_create(lv_obj_t *root)
      * after, and now reading the live accent) would paint the default until the first
      * ui_update() corrected them. Dynamic mode keeps the default until an album accent lands. */
     accent = (g_accent_mode == 1) ? theme_color_from_rgb(g_accent_color) : TC(ACCENT_PRIMARY);
+    ui_zune_art_sync();
     last_path[0] = '\0';
     last_art_key[0] = '\0';
     want_art_key[0] = '\0';
@@ -3406,6 +3812,7 @@ void ui_create(lv_obj_t *root)
     ui_imm_control_apply();
 
 
+    if(th_zune()) zune_imm_build(fsart);                  /* Zune: its tap / scrub layer (kept above the title below) */
     fsart_title = lv_label_create(fsart);
     lv_obj_set_width(fsart_title, 200);   /* two rows under the top arch, like Home */
     style_text(fsart_title, &s_font18, TC(FIXED_MEDIA_TITLE));
@@ -3472,6 +3879,7 @@ void ui_update(const track_state_t *st)
         set_label_text_changed(title, "No Track");
         set_label_text_changed(artist, "");
         set_label_text_changed(album, "");
+        if(th_zune()) zune_idle(1);
         set_label_text_changed(t_elapsed, "0:00");
         set_label_text_changed(t_remain, "0:00");
         set_label_text_changed(btn_pp, LV_SYMBOL_PLAY);
@@ -3491,9 +3899,16 @@ void ui_update(const track_state_t *st)
     ui_history_tick(st);
 
     { const char *nt = st->title[0] ? st->title : "Untitled";
+      if(th_zune()){                                   /* Zune: the label holds "..." when cut, so compare the source */
+          static char zt[256];
+          if(strcmp(zt, nt)){ copy_cstr(zt, sizeof zt, nt); lv_label_set_text(title, nt); zune_title_fit_text(nt); }
+          goto zune_title_done;
+      }
       int changed = strcmp(lv_label_get_text(title), nt) != 0;
       set_label_text_changed(title, nt);
       if(changed) ui_np_rescroll(); }                      /* a new track may scroll again */
+    zune_title_done:
+    if(th_zune()){ zune_idle(0); zune_fmt_update(st); }
     set_label_text_changed(artist, st->artist[0] ? st->artist : "");
     /* keep the full-screen art view fresh while it's open: text every update, image only on a
      * genuine track change (a PNG decode is too costly to do every position tick). */
@@ -3518,7 +3933,11 @@ void ui_update(const track_state_t *st)
                 else            snprintf(ab, sizeof ab, "%s", st->playing_num);
             } else ab[0] = '\0';
         }
-        set_label_text_changed(album, ab);
+        if(th_zune()){                               /* Zune: the album alone, one or two lines (Figma 10) */
+            static char zab[240];
+            const char *za = book_meta_line(st, ab, sizeof ab) ? ab : st->album;
+            if(strcmp(zab, za)){ copy_cstr(zab, sizeof zab, za); lv_label_set_text(album, za); zune_album_fit(za); }
+        } else set_label_text_changed(album, ab);
     }
     /* honour an optimistic-favourite hold so a1 position frames don't bounce the heart back */
     snprintf(g_np_curpath, sizeof g_np_curpath, "%s", st->path);
@@ -3543,7 +3962,7 @@ void ui_update(const track_state_t *st)
             int armed = ui_sleep_state(NULL);                   /* accent the moon while a timer is set */
             lv_obj_set_style_text_color(sleep_icon, armed ? accent : TC(TEXT_MUTED), LV_PART_MAIN);
         } else {
-            lv_obj_remove_flag(btn_mode, LV_OBJ_FLAG_HIDDEN);
+            if(!th_zune()) lv_obj_remove_flag(btn_mode, LV_OBJ_FLAG_HIDDEN);   /* Zune: play mode lives in the actions menu */
             lv_obj_add_flag(btn_sleep, LV_OBJ_FLAG_HIDDEN);
             ui_np_close_overlays();   /* not a book -> dismiss any open sleep popover (its context is gone) */
         }
@@ -3668,6 +4087,54 @@ static void dvol_paint(int v){
     if(v > 0) lv_obj_remove_flag(g_dv_cap, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(g_dv_cap, LV_OBJ_FLAG_HIDDEN);
     int kc = v * DV_N / (VOL_MAX + 1);                                  /* the knob wears the colour at the level */
     lv_obj_set_style_bg_color(g_vol_arc, acc ? ui_current_accent() : theme_color_from_rgb(IRI[kc]), LV_PART_KNOB);
+}
+/* Zune (Figma 05): the whole glass - a hairline track round the rim (open at the bottom), the accent level with a dot,
+ * the level in Light 96, "volume" under it, the gain in small caps and the max-volume cap as a tick on the track */
+LV_FONT_DECLARE(font_zune_light_96) LV_FONT_DECLARE(font_zune_regular_14) LV_FONT_DECLARE(font_zune_regular_12) LV_FONT_DECLARE(font_zune_semibold_11)
+static lv_obj_t *g_zvol_cap, *g_zvol_max, *g_zvol_out;
+static lv_point_precise_t g_zvol_cp[2];
+static void zvol_build(void){
+    lv_obj_set_style_bg_color(g_vol_panel, TC(CANVAS), 0); lv_obj_set_style_bg_opa(g_vol_panel, LV_OPA_COVER, 0);
+    lv_obj_set_size(g_vol_arc, 332, 332); lv_obj_center(g_vol_arc);
+    lv_arc_set_rotation(g_vol_arc, 0); lv_arc_set_bg_angles(g_vol_arc, 135, 45); lv_arc_set_mode(g_vol_arc, LV_ARC_MODE_NORMAL);
+    lv_obj_set_style_arc_width(g_vol_arc, 4, LV_PART_MAIN); lv_obj_set_style_arc_width(g_vol_arc, 6, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(g_vol_arc, TC(CONTROL_TRACK), LV_PART_MAIN);
+    lv_obj_set_style_border_width(g_vol_arc, 0, LV_PART_KNOB); lv_obj_set_style_pad_all(g_vol_arc, 6, LV_PART_KNOB);
+    lv_obj_t *badge = lv_obj_get_parent(g_vol_num);
+    lv_obj_add_flag(lv_obj_get_child(badge, 0), LV_OBJ_FLAG_HIDDEN);                 /* no speaker */
+    lv_obj_set_flex_flow(badge, LV_FLEX_FLOW_COLUMN); lv_obj_set_style_bg_opa(badge, 0, 0);
+    lv_obj_set_style_pad_all(badge, 0, 0); lv_obj_set_style_pad_row(badge, 0, 0);
+    lv_obj_set_size(badge, 200, LV_SIZE_CONTENT);
+    lv_obj_set_flex_align(badge, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_align(badge, LV_ALIGN_TOP_MID, 0, 74);
+    lv_obj_set_style_text_font(g_vol_num, zune_font(&font_zune_light_96), 0);
+    lv_obj_t *cap = lv_label_create(badge); lv_label_set_text(cap, "volume");
+    lv_obj_set_style_text_font(cap, zune_font(&font_zune_regular_14), 0); lv_obj_set_style_text_color(cap, TC(TEXT_MUTED), 0);
+    lv_obj_set_style_margin_top(cap, 12, 0);
+    g_zvol_out = lv_label_create(g_vol_panel);
+    lv_obj_set_style_text_font(g_zvol_out, &font_zune_semibold_11, 0); lv_obj_set_style_text_letter_space(g_zvol_out, 2, 0);
+    lv_obj_set_style_text_color(g_zvol_out, TC(ACCENT_PRIMARY), 0); lv_obj_align(g_zvol_out, LV_ALIGN_TOP_MID, 0, 262);
+    lv_obj_clear_flag(g_zvol_out, LV_OBJ_FLAG_CLICKABLE);
+    g_zvol_cap = lv_line_create(g_vol_panel);
+    lv_obj_set_style_line_width(g_zvol_cap, 3, 0); lv_obj_set_style_line_rounded(g_zvol_cap, true, 0);
+    lv_obj_set_style_line_color(g_zvol_cap, TC(TEXT_PRIMARY), 0); lv_obj_clear_flag(g_zvol_cap, LV_OBJ_FLAG_CLICKABLE);
+    g_zvol_max = lv_label_create(g_vol_panel);
+    lv_obj_set_style_text_font(g_zvol_max, zune_font(&font_zune_regular_12), 0); lv_obj_set_style_text_color(g_zvol_max, TC(TEXT_MUTED), 0);
+    lv_obj_clear_flag(g_zvol_max, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_move_foreground(g_vol_arc);
+}
+static void zvol_paint(void){
+    if(!g_zvol_cap) return;
+    lv_label_set_text(g_zvol_out, simple_cfg_get_int("audio_gain", 0) ? "HIGH GAIN" : "LOW GAIN");
+    int mx = simple_cfg_get_int("max_vol", VOL_MAX); if(mx < 1) mx = 1; if(mx > VOL_MAX) mx = VOL_MAX;
+    if(mx >= VOL_MAX){ lv_obj_add_flag(g_zvol_cap, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(g_zvol_max, LV_OBJ_FLAG_HIDDEN); return; }
+    float an = (135 + 270.0f * mx / VOL_MAX) * 0.0174533f;
+    g_zvol_cp[0].x = 180 + 158 * cosf(an); g_zvol_cp[0].y = 180 + 158 * sinf(an);
+    g_zvol_cp[1].x = 180 + 174 * cosf(an); g_zvol_cp[1].y = 180 + 174 * sinf(an);
+    lv_line_set_points(g_zvol_cap, g_zvol_cp, 2);
+    char b[16]; snprintf(b, sizeof b, "max %d", mx); lv_label_set_text(g_zvol_max, b);
+    lv_obj_align(g_zvol_max, LV_ALIGN_CENTER, (int32_t)(132 * cosf(an)) - 6, (int32_t)(132 * sinf(an)));
+    lv_obj_remove_flag(g_zvol_cap, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(g_zvol_max, LV_OBJ_FLAG_HIDDEN);
 }
 static void vol_tap_close_cb(lv_event_t *e){ (void)e; if(g_vol_panel) lv_obj_add_flag(g_vol_panel, LV_OBJ_FLAG_HIDDEN); if(g_vol_timer) lv_timer_pause(g_vol_timer); }
 static lv_obj_t *imm_passive_controls[16];static int imm_passive_count;
@@ -3849,6 +4316,8 @@ void ui_show_volume(int vol)
             lv_obj_t *mid = lv_obj_get_child(g_vol_panel, 1); (void)mid;
         }
     }
+    if(th_zune() && !g_zvol_cap) zvol_build();
+    if(th_zune()) zvol_paint();
     if(!th_braun()){ lv_color_t acc = ui_current_accent();       /* follow an accent change (Braun: always orange) */
       lv_obj_set_style_arc_color(g_vol_arc, acc, LV_PART_INDICATOR);
       lv_obj_set_style_bg_color(g_vol_arc, acc, LV_PART_KNOB);

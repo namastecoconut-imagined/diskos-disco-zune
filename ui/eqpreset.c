@@ -38,7 +38,91 @@ static void profile_poll(lv_timer_t *timer){
   if(result.preset==selected())profile_paint(result.preset,result.read,result.graphic,result.hz);
  }
 }
+
+/* ==== Zune (Figma 36): the presets on a dial, the one in use in the accent; "equalizer on" with a switch at the foot;
+ * edit / rename under it while a user profile is on the focus line ==== */
+#include "zune_dial.h"
+static void toggle(lv_event_t *e); static void renamed(const char *text);
+LV_FONT_DECLARE(font_zune_semibold_11) LV_FONT_DECLARE(font_zune_regular_14) LV_FONT_DECLARE(font_zune_regular_13)
+static lv_obj_t *g_zroot, *g_zsw, *g_zlinks; static lv_timer_t *g_zfoc_tm; static int g_zlast_focus = -1;
+static char g_znames[20][40];
+static void zlow(char *o, size_t n, const char *s){ size_t i = 0; for(; s[i] && i + 1 < n; i++) o[i] = (s[i] >= 'A' && s[i] <= 'Z') ? s[i] + 32 : s[i]; o[i] = 0; }
+static void zsw_paint(void){
+    if(!g_zsw) return;
+    int on = selected() != 0;
+    lv_obj_set_style_bg_color(g_zsw, on ? TC(ACCENT_PRIMARY) : TC(CONTROL_TRACK), 0);
+    lv_obj_t *k = lv_obj_get_child(g_zsw, 0); if(k) lv_obj_align(k, on ? LV_ALIGN_RIGHT_MID : LV_ALIGN_LEFT_MID, on ? -3 : 3, 0);
+}
+static void zfoc_tick(lv_timer_t *t){
+    (void)t; if(screen_current() != SCR_EQ || !g_zlinks) return;
+    int f = zdial_focus(); if(f == g_zlast_focus) return; g_zlast_focus = f;
+    if(f >= 10) lv_obj_remove_flag(g_zlinks, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(g_zlinks, LV_OBJ_FLAG_HIDDEN);
+}
+static void zeq_build(void);
+static void zeq_rebuild(void *u){ (void)u; zeq_build(); }
+static void zeq_pick(int i){
+    int p = i + 1;
+    if(ui_eq_select(p) < 0){ ui_toast("Couldn't switch EQ"); return; }
+    lv_async_call(zeq_rebuild, NULL);
+}
+static void zeq_toggle(lv_event_t *e){ toggle(e); lv_async_call(zeq_rebuild, NULL); }
+static void zeq_edit(lv_event_t *e){ (void)e; int f = zdial_focus() + 1; if(f != selected() && ui_eq_select(f) < 0) return; screen_show(SCR_EQ_EDITOR); }
+static void zeq_rename(lv_event_t *e){ (void)e; rename_preset = zdial_focus() + 1; char b[80]; name_for(rename_preset, b, sizeof b); kbinput_open("Rename EQ", b, renamed); }
+static lv_obj_t *zlink(lv_obj_t *p, const char *t, lv_color_t c, lv_event_cb_t cb){
+    lv_obj_t *l = lv_label_create(p); kit_keep(l); lv_label_set_text(l, t);
+    lv_obj_set_style_text_font(l, zune_font(&font_zune_regular_14), 0); lv_obj_set_style_text_color(l, c, 0);
+    lv_obj_add_flag(l, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_ext_click_area(l, 12);
+    lv_obj_add_event_cb(l, cb, LV_EVENT_CLICKED, NULL); return l;
+}
+static void zeq_build(void){
+    lv_obj_t *root = g_zroot; if(!root) return;
+    lv_obj_clean(root); g_zsw = g_zlinks = NULL; g_zlast_focus = -1;
+    lv_obj_set_style_bg_color(root, TC(CANVAS), 0); lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(root, LV_OBJ_FLAG_SCROLLABLE);
+    const char *lb[20];
+    for(int i = 0; i < 20; i++){ char b[40]; name_for(i + 1, b, sizeof b); zlow(g_znames[i], sizeof g_znames[i], b); lb[i] = g_znames[i]; }
+    int cur = selected(), focus = cur ? cur - 1 : simple_cfg_get_int("eq_last", 1) - 1;
+    if(focus < 0 || focus >= 20) focus = 0;
+    zdial_build(root, lb, 20, focus, zeq_pick, 44, "eq.zune");
+    zdial_set_bottom(250);
+    if(cur) zdial_set_color(cur - 1, TC(ACCENT_PRIMARY));
+    for(int k = 0; k < 2; k++){                                   /* fades so the dial melts into the caption and the foot */
+        lv_obj_t *f = lv_obj_create(root); lv_obj_remove_style_all(f); kit_keep(f);
+        lv_obj_set_size(f, 360, k ? 96 : 62); lv_obj_align(f, k ? LV_ALIGN_BOTTOM_MID : LV_ALIGN_TOP_MID, 0, 0);
+        lv_obj_set_style_bg_color(f, TC(CANVAS), 0); lv_obj_set_style_bg_grad_color(f, TC(CANVAS), 0);
+        lv_obj_set_style_bg_grad_dir(f, LV_GRAD_DIR_VER, 0); lv_obj_set_style_bg_opa(f, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_main_opa(f, k ? LV_OPA_TRANSP : LV_OPA_COVER, 0); lv_obj_set_style_bg_grad_opa(f, k ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+        lv_obj_set_style_bg_main_stop(f, k ? 0 : 140, 0); lv_obj_set_style_bg_grad_stop(f, k ? 120 : 255, 0);
+        lv_obj_remove_flag(f, LV_OBJ_FLAG_CLICKABLE);
+    }
+    lv_obj_t *cap = lv_label_create(root); kit_keep(cap); lv_label_set_text(cap, "EQUALIZER");
+    lv_obj_set_style_text_font(cap, &font_zune_semibold_11, 0); lv_obj_set_style_text_letter_space(cap, 2, 0);
+    lv_obj_set_style_text_color(cap, TC(TEXT_MUTED), 0); lv_obj_align(cap, LV_ALIGN_TOP_MID, 0, 26);
+    /* the foot: "equalizer on" + switch, and edit / rename for user profiles */
+    lv_obj_t *row = lv_obj_create(root); lv_obj_remove_style_all(row); kit_keep(row);
+    lv_obj_set_size(row, 180, 30); lv_obj_align(row, LV_ALIGN_TOP_MID, 0, 290);
+    lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(row, zeq_toggle, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *t = lv_label_create(row); kit_keep(t); lv_label_set_text(t, "equalizer on");
+    lv_obj_set_style_text_font(t, zune_font(&font_zune_regular_13), 0); lv_obj_set_style_text_color(t, TC(TEXT_PRIMARY), 0);
+    lv_obj_align(t, LV_ALIGN_LEFT_MID, 8, 0);
+    g_zsw = lv_obj_create(row); lv_obj_remove_style_all(g_zsw); kit_keep(g_zsw);
+    lv_obj_set_size(g_zsw, 36, 20); lv_obj_set_style_radius(g_zsw, LV_RADIUS_CIRCLE, 0); lv_obj_set_style_bg_opa(g_zsw, LV_OPA_COVER, 0);
+    lv_obj_align(g_zsw, LV_ALIGN_RIGHT_MID, -8, 0); lv_obj_remove_flag(g_zsw, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *k = lv_obj_create(g_zsw); lv_obj_remove_style_all(k); kit_keep(k);
+    lv_obj_set_size(k, 14, 14); lv_obj_set_style_radius(k, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(k, TC(FIXED_MEDIA_WHITE), 0); lv_obj_set_style_bg_opa(k, LV_OPA_COVER, 0);
+    zsw_paint();
+    g_zlinks = lv_obj_create(root); lv_obj_remove_style_all(g_zlinks); kit_keep(g_zlinks);
+    lv_obj_set_size(g_zlinks, 160, 24); lv_obj_align(g_zlinks, LV_ALIGN_TOP_MID, 0, 254);
+    lv_obj_remove_flag(g_zlinks, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *ed = zlink(g_zlinks, "edit", TC(ACCENT_PRIMARY), zeq_edit); lv_obj_align(ed, LV_ALIGN_LEFT_MID, 20, 0);
+    lv_obj_t *rn = zlink(g_zlinks, "rename", TC(TEXT_PRIMARY), zeq_rename); lv_obj_align(rn, LV_ALIGN_RIGHT_MID, -20, 0);
+    if(!g_zfoc_tm) g_zfoc_tm = lv_timer_create(zfoc_tick, 150, NULL);
+    zfoc_tick(NULL);
+}
 void eqpreset_refresh(void){
+ if(th_zune()){ if(fw_os_ver()==257)eq_rate_request(); zeq_build(); return; }
  if(!name_label)return;if(fw_os_ver()==257)eq_rate_request();int p=selected();char b[80];name_for(p,b,sizeof b);if(th_null()){char up[80];theme_upper(up,sizeof up,b);lv_label_set_text(name_label,up);}else lv_label_set_text(name_label,b);
  profile_ticket=0;
  if(p>=11){profile_ticket=eq_profile_request(p);profile_paint(p,profile_ticket?-2:-1,0,NULL);}
@@ -70,6 +154,7 @@ static lv_obj_t *button(lv_obj_t *root,const char *text,int x,int y,int w,int h,
  ui_on(b,cb,LV_EVENT_CLICKED,data,action,UI_CORE);return b;
 }
 void eqpreset_create(lv_obj_t *root){
+ if(th_zune()){ g_zroot=root; return; }
  lv_obj_set_style_bg_color(root,TC(CANVAS),0);ui_header(root,"Equalizer");
  lv_obj_t *prev_b=button(root,LV_SYMBOL_LEFT,-118,123,42,42,cycle,(void *)(intptr_t)-1,"eq.previous");
  lv_obj_t *next_b=button(root,LV_SYMBOL_RIGHT,118,123,42,42,cycle,(void *)(intptr_t)1,"eq.next");

@@ -264,8 +264,28 @@ static lv_obj_t *g_m;                          /* the one open modal (top layer)
 static void modal_close(void){ if(g_m){ lv_obj_delete_async(g_m); g_m = NULL; } }
 static void cb_close(lv_event_t *e){ if(lv_event_get_code(e) == LV_EVENT_CLICKED){ modal_close(); } }
 
+/* Zune: these dialogs take the whole glass (black, the title in Light, lower case) and their buttons become the
+ * split cap along the bottom, as in the confirm screen (Figma 07): left grey, right (or a lone one) in the accent */
+LV_FONT_DECLARE(font_zune_light_32) LV_FONT_DECLARE(font_zune_regular_14) LV_FONT_DECLARE(font_zune_regular_17)
+const lv_font_t *zune_font(const lv_font_t *base);
+static void zlow(char *o, size_t n, const char *s){ size_t i = 0; for(; s[i] && i + 1 < n; i++) o[i] = (s[i] >= 'A' && s[i] <= 'Z') ? s[i] + 32 : s[i]; o[i] = 0; }
 static lv_obj_t *modal_card(const char *title, int h){
     modal_close();
+    if(th_zune()){
+        (void)h;
+        g_m = lv_obj_create(lv_layer_top()); lv_obj_remove_style_all(g_m);
+        lv_obj_set_size(g_m, 360, 360); lv_obj_center(g_m);
+        lv_obj_set_style_bg_color(g_m, TC(CANVAS), 0); lv_obj_set_style_bg_opa(g_m, LV_OPA_COVER, 0);
+        lv_obj_clear_flag(g_m, LV_OBJ_FLAG_SCROLLABLE); lv_obj_add_flag(g_m, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_t *card = lv_obj_create(g_m); lv_obj_remove_style_all(card); kit_keep(card);
+        lv_obj_set_size(card, 360, 360); lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+        char lt[80]; zlow(lt, sizeof lt, tr(title));
+        lv_obj_t *t = lv_label_create(card); kit_keep(t); lv_label_set_text(t, lt);
+        lv_label_set_long_mode(t, LV_LABEL_LONG_WRAP); lv_obj_set_width(t, 280); lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_font(t, zune_font(&font_zune_light_32), 0); lv_obj_set_style_text_color(t, TC(TEXT_PRIMARY), 0);
+        lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 62);
+        return card;
+    }
     g_m = lv_obj_create(lv_layer_top());
     lv_obj_remove_style_all(g_m);
     lv_obj_set_size(g_m, 360, 360); lv_obj_center(g_m);
@@ -288,6 +308,15 @@ static lv_obj_t *modal_card(const char *title, int h){
     return card;
 }
 static lv_obj_t *modal_text(lv_obj_t *card, const char *txt, int y, theme_color_role_t col){
+    if(th_zune()){
+        lv_obj_t *s = lv_label_create(card); kit_keep(s); lv_label_set_text(s, txt);
+        lv_label_set_long_mode(s, LV_LABEL_LONG_WRAP); lv_obj_set_width(s, 260);
+        lv_obj_set_style_text_align(s, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_font(s, zune_font(&font_zune_regular_14), 0);
+        lv_obj_set_style_text_color(s, col == THEME_CLR_TEXT_MUTED ? TC(TEXT_MUTED) : theme_color(col), 0);
+        lv_obj_align(s, LV_ALIGN_TOP_MID, 0, y + 70);
+        return s;
+    }
     lv_obj_t *s = lv_label_create(card);
     lv_label_set_text(s, txt);
     lv_label_set_long_mode(s, LV_LABEL_LONG_WRAP);
@@ -299,6 +328,21 @@ static lv_obj_t *modal_text(lv_obj_t *card, const char *txt, int y, theme_color_
     return s;
 }
 static void modal_pill(lv_obj_t *card, int x, const char *txt, theme_color_role_t col, lv_event_cb_t cb, const char *action){
+    if(th_zune()){
+        int accent = x >= 0;                                      /* the right half, or a lone button: the accent */
+        lv_obj_t *b = lv_obj_create(card); lv_obj_remove_style_all(b); kit_keep(b);
+        lv_obj_set_size(b, x == 0 ? 360 : 179, 104); lv_obj_set_pos(b, x > 0 ? 181 : 0, 256);
+        lv_obj_set_style_bg_color(b, accent ? TC(ACCENT_PRIMARY) : TC(SURFACE), 0); lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+        lv_obj_set_style_opa(b, LV_OPA_80, LV_STATE_PRESSED);
+        lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE); lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+        ui_on(b, cb, LV_EVENT_CLICKED, NULL, action, UI_CORE);
+        char lt[40]; zlow(lt, sizeof lt, tr(txt));
+        lv_obj_t *l = lv_label_create(b); kit_keep(l); lv_label_set_text(l, lt);
+        lv_obj_set_style_text_font(l, zune_font(&font_zune_regular_17), 0);
+        lv_obj_set_style_text_color(l, accent ? TC(ON_ACCENT) : TC(TEXT_PRIMARY), 0);
+        lv_obj_align(l, LV_ALIGN_TOP_MID, x < 0 ? 20 : x > 0 ? -20 : 0, 22);
+        return;
+    }
     lv_obj_t *b = lv_button_create(card);
     lv_obj_remove_style_all(b);
     lv_obj_set_size(b, 108, 40); lv_obj_align(b, LV_ALIGN_BOTTOM_MID, x, -14);
@@ -320,7 +364,7 @@ static void modal_simple(const char *title, const char *body){          /* one "
      * long or translated message (up to ~10 lines) clears OK; capped at 300 like About so it stays on the round screen */
     lv_obj_update_layout(s);
     int32_t h = 46 + lv_obj_get_height(s) + 12 + 40 + 14;
-    if(h > 190) { lv_obj_set_height(c, h > 300 ? 300 : h); lv_obj_center(c); }
+    if(h > 190 && !th_zune()) { lv_obj_set_height(c, h > 300 ? 300 : h); lv_obj_center(c); }
     modal_pill(c, 0, "OK", THEME_CLR_ACCENT_EMPHASIS, cb_close, "system.ok");
 }
 
@@ -343,7 +387,18 @@ void system_about_open(int v){
     lv_obj_set_style_pad_row(list, 6, 0);
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_OFF);
+    if(th_zune()){ lv_obj_set_size(list, 260, rb ? 110 : 136); lv_obj_align(list, LV_ALIGN_TOP_MID, 0, rb ? 140 : 112); lv_obj_set_style_pad_row(list, 2, 0); }
     for(int i = 0; i < n; i++){
+        if(th_zune()){                                            /* Figma 58: the value large, its name small under it */
+            lv_obj_t *v = lv_label_create(list); kit_keep(v); lv_label_set_text(v, rows[i].value);
+            lv_label_set_long_mode(v, LV_LABEL_LONG_WRAP); lv_obj_set_width(v, 256);
+            lv_obj_set_style_text_font(v, zune_font(&font_zune_regular_17), 0); lv_obj_set_style_text_color(v, TC(TEXT_PRIMARY), 0);
+            char lb[48]; zlow(lb, sizeof lb, rows[i].label);
+            lv_obj_t *l = lv_label_create(list); kit_keep(l); lv_label_set_text(l, lb);
+            lv_obj_set_style_text_font(l, zune_font(&font_zune_regular_14), 0); lv_obj_set_style_text_color(l, TC(TEXT_MUTED), 0);
+            lv_obj_set_style_pad_bottom(l, 8, 0);
+            continue;
+        }
         lv_obj_t *l = lv_label_create(list);
         lv_label_set_text(l, rows[i].label);
         lv_obj_set_style_text_font(l, TF(UI_12), 0);
@@ -487,7 +542,7 @@ static void chk_tick(lv_timer_t *t){
  * writes the revert request marker (boot rolls the trial back) and offers the restart. No proof = never promoted: the
  * boot's trial counter keeps running and rolls it back. The identity checks (running exe hash, run + launched files) are
  * in ota_health_write / ota_revert_write. */
-#define OTA_HEALTH_MIN_MS 180000
+#define OTA_HEALTH_MIN_MS 30000   /* fork (Zune): 30 s instead of 3 min, for quick build-test-keep cycles. Crash loops still roll back (launcher + boot count) */
 static struct { uint32_t t0; _Atomic int play, ok, asked; char ver[24]; } g_hl;
 static lv_timer_t *g_hl_tm;
 static void *ota_health_thread(void *a){ (void)a; ota_health_write(&OTA_DEV); return NULL; }
@@ -568,15 +623,18 @@ void system_check_update_open(int v){
 }
 
 /* ---- Reset diskOS settings ---- */
-static void cb_reset_go(lv_event_t *e){
-    if(lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+static void reset_go(void);
+static void cb_reset_go(lv_event_t *e){ if(lv_event_get_code(e) == LV_EVENT_CLICKED) reset_go(); }
+static void reset_go(void){
     modal_close();
     int rc = sys_reset_settings();
     if(rc == -1){ ui_toast("Couldn't reset - nothing changed"); return; }
     settings_restart_prompt(rc == -2 ? "Settings reset, but may not be saved. Restart to check." : NULL);
 }
+void zune_confirm(const char *title, const char *body, const char *no, const char *yes, void (*on_yes)(void));
 void system_reset_open(int v){
     (void)v;
+    if(th_zune()){ zune_confirm("reset settings?", "look and behaviour go back to defaults, then diskos restarts. music, wi-fi, bluetooth, eq and audio are kept.", "cancel", "reset", reset_go); return; }
     lv_obj_t *c = modal_card("Reset diskOS settings?", 250);
     modal_text(c, "Look and behaviour settings go back to defaults, then diskOS restarts. Music, Wi-Fi, Bluetooth, Last.fm, EQ and audio settings are kept.", 46, THEME_CLR_TEXT_MUTED);
     modal_pill(c, -58, "Cancel", THEME_CLR_TEXT_SECONDARY, cb_close, "system.reset_cancel");

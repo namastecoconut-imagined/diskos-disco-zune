@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include "fwcaps.h"
 #include "screens.h"
+#include "zune_dial.h"
 #include "braun.h"
 #include "theme.h"
 #include "null_theme.h"
@@ -87,6 +88,7 @@ static void scan_proc_stop(void){                 /* end our device search: its 
 static lv_obj_t *g_scan_icon;
 static void spin_anim_cb(void *o, int32_t v){ lv_obj_set_style_transform_rotation((lv_obj_t*)o, v, 0); }
 static void scan_stop(void){
+    if(th_zune()) zune_rim_spin(NULL, 0);
     if(g_scan_icon){ lv_anim_delete(g_scan_icon, spin_anim_cb); g_scan_icon = NULL; }
 }
 
@@ -215,6 +217,15 @@ static void list_msg_scanning(void){
     if(!g_list) return;
     scan_stop();
     lv_obj_clean(g_list);
+    if(th_zune()){                                      /* Figma 74: a line of help, the rim turning */
+        lv_obj_set_flex_align(g_list, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_t *t = lv_label_create(g_list); lv_label_set_text(t, "looking for devices\xE2\x80\xA6 put yours in pairing mode");
+        lv_label_set_long_mode(t, LV_LABEL_LONG_WRAP); lv_obj_set_width(t, 220);
+        lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(t, TC(TEXT_SECONDARY), 0); lv_obj_set_style_text_font(t, TF(UI_14), 0);
+        zune_rim_spin(lv_obj_get_screen(g_list), 1);
+        return;
+    }
     lv_obj_set_flex_align(g_list, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_t *row = lv_obj_create(g_list);
     lv_obj_remove_style_all(row);
@@ -808,6 +819,16 @@ static int bt_conn_check(const char *mac){            /* 1 = the last finished c
 static void bt_remember_last(const char *mac){
     if(bt_mac_valid(mac) && strcmp(cfg_get_str("bt_last", ""), mac)) cfg_set_str("bt_last", mac);
 }
+static char g_bt_conn_name[64];           /* the device's name for the Zune pairing takeover */
+static void bt_connect(const char *mac);
+static void zbt_retry(void){ if(g_bt_conn_mac[0]){ char m[32]; snprintf(m, sizeof m, "%s", g_bt_conn_mac); bt_connect(m); } }
+static void zbt_cancel(void){
+    if(g_bt_conn_timer){ lv_timer_del(g_bt_conn_timer); g_bt_conn_timer = NULL; }
+    conn_proc_stop();
+    pthread_mutex_lock(&g_cc_mu); g_cc_mac[0] = 0; g_cc_yes = 0; pthread_mutex_unlock(&g_cc_mu);
+    scan_kick();
+}
+static const char *zbt_name(void){ return g_bt_conn_name[0] ? g_bt_conn_name : "the device"; }
 static void bt_conn_poll_cb(lv_timer_t *t){
     (void)t;
     if(bt_conn_check(g_bt_conn_mac)){
@@ -818,7 +839,12 @@ static void bt_conn_poll_cb(lv_timer_t *t){
          * actually went through; otherwise stay honest and leave g_bt_autorouted unset so the
          * autoroute poll keeps retrying the route. */
         int routed = ui_route_bt(g_bt_conn_mac);
-        if(routed == 0){
+        if(th_zune()){
+            zune_takeover_close();
+            if(routed == 0) snprintf(g_bt_autorouted, sizeof g_bt_autorouted, "%s", g_bt_conn_mac);
+            char b[96]; snprintf(b, sizeof b, routed == 0 || routed == -2 ? "%s connected" : "%s paired \xC2\xB7 audio stays here", zbt_name());
+            ui_toast_icon(LV_SYMBOL_BLUETOOTH, ui_current_accent(), b);
+        } else if(routed == 0){
             snprintf(g_bt_autorouted, sizeof g_bt_autorouted, "%s", g_bt_conn_mac);
             ui_toast("Connected");
         } else if(routed == -2){            /* deferred while a song starts: the auto-route poll routes it shortly */
@@ -831,6 +857,12 @@ static void bt_conn_poll_cb(lv_timer_t *t){
     }
     if(lv_tick_elaps(g_bt_conn_start) > 25000){   /* pairing can be slow */
         lv_timer_del(g_bt_conn_timer); g_bt_conn_timer = NULL;
+        if(th_zune()){
+            char sub[128]; snprintf(sub, sizeof sub, "%s didn't answer. check it's on and in pairing mode.", zbt_name());
+            ztake_t z = { .icon = LV_SYMBOL_CLOSE, .icon_ring = 64, .ring_pct = -1, .title = "couldn't connect", .sub = sub,
+                          .l1 = "try again", .cb1 = zbt_retry, .l2 = "cancel" };
+            zune_takeover(&z);
+        } else
         ui_toast("Couldn't connect");
         scan_kick();                        /* re-list the current devices, no fresh discovery */
     }
@@ -859,6 +891,12 @@ static void bt_connect(const char *mac){
     }
     if(!strcmp(g_disc_mac, mac)) g_disc_mac[0] = 0;   /* connecting again lifts an earlier Disconnect's block */
     snprintf(g_bt_conn_mac, sizeof g_bt_conn_mac, "%s", mac);
+    if(th_zune()){                                       /* Figma 74: takeover with the device, rim turning */
+        char sub[96]; snprintf(sub, sizeof sub, "with %s", zbt_name());
+        ztake_t z = { .icon = LV_SYMBOL_AUDIO, .icon_ring = 80, .spin = 1, .ring_pct = -1, .title = "connecting", .sub = sub,
+                      .note = "if a code appears on your device, it should match", .l1 = "cancel", .cb1 = zbt_cancel };
+        zune_takeover(&z);
+    } else
     ui_toast("Connecting...");
     g_bt_conn_start = lv_tick_get();
     if(g_bt_conn_timer) lv_timer_del(g_bt_conn_timer);
@@ -1030,6 +1068,7 @@ int bt_peer_name(char *out, int cap){
 
 /* ---- details screen (SCR_BT_INFO) --------------------------------------- */
 static void info_row(const char *key, const char *val){
+    if(th_zune()){ zune_info_row(g_info_list, key, val); return; }
     lv_obj_t *r = lv_obj_create(g_info_list);
     lv_obj_remove_style_all(r);
     lv_obj_set_size(r, 250, 40);
@@ -1070,6 +1109,7 @@ static void info_forget_cb(lv_event_t *e){
     lv_timer_set_repeat_count(g_scan_timer, 1);
 }
 static void info_action_row(const char *label, lv_event_cb_t cb){
+    if(th_zune()){ zune_info_action(g_info_list, label, cb, "bt.cb"); return; }
     lv_obj_t *r = lv_button_create(g_info_list);
     lv_obj_remove_style_all(r);
     lv_obj_set_size(r, 250, 44);
@@ -1099,6 +1139,7 @@ static void info_back_cb(lv_event_t *e){ if(lv_event_get_code(e)==LV_EVENT_CLICK
 void bt_info_create(lv_obj_t *root){
     lv_obj_set_style_bg_color(root, TC(CANVAS), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
+    if(th_zune()){ g_info_list = zune_info_page(root, "device", info_back_cb); return; }
     ui_header_cb(root, "Device", info_back_cb);   /* shared header */
     g_info_list = lv_obj_create(root);
     lv_obj_remove_style_all(g_info_list);
@@ -1139,13 +1180,14 @@ void bt_info_open(void){
       info_row("Paired",    (bt_info_prop(buf,"Paired:",   v,sizeof v) && !strcmp(v,"yes")) ? "Yes" : "No");
       if(bt_info_prop(buf,"Icon:",v,sizeof v)) info_row("Type", v); }
     info_row("Audio", "On (beta)");   /* routing works; SBC over this CPU can be rough. short: value label is 142px */
-    info_action_row("Forget This Device", info_forget_cb);   /* C13: unpair + untrust */
+    if(th_zune()) info_action_row("disconnect", info_disc_cb);        /* Zune: no separate button under the list */
+    info_action_row(th_zune() ? "forget" : "Forget This Device", info_forget_cb);   /* C13: unpair + untrust */
     screen_show(SCR_BT_INFO);
 }
 
 /* ---- device list -------------------------------------------------------- */
 /* A row's data rides in its event callbacks, NOT in lv_obj user data (the curved-list helper owns that slot). */
-typedef struct { int connected; char mac[20]; } devrow_t;
+typedef struct { int connected; char mac[20]; char name[64]; } devrow_t;
 static void row_free_cb(lv_event_t *e){ free(lv_event_get_user_data(e)); }
 static void dev_cb(lv_event_t *e){
     if(lv_event_get_code(e)!=LV_EVENT_CLICKED) return;
@@ -1159,6 +1201,7 @@ static void dev_cb(lv_event_t *e){
         ui_route_bt(mac);        /* tapping a connected audio device routes playback to it (no-op if already) */
         bt_info_open();
     } else {
+        snprintf(g_bt_conn_name, sizeof g_bt_conn_name, "%s", dr->name);
         bt_connect(mac);
         list_msg("Connecting " LV_SYMBOL_BLUETOOTH);
         if(g_hsub) lv_label_set_text(g_hsub, "Connecting...");
@@ -1181,7 +1224,7 @@ static void add_dev_row(const char *mac, const char *name, int connected, const 
     lv_obj_set_style_bg_color(r, TC(SURFACE_RAISED), LV_STATE_PRESSED);
     lv_obj_clear_flag(r, LV_OBJ_FLAG_SCROLLABLE);
     devrow_t *dr = malloc(sizeof *dr);
-    if(dr){ dr->connected = connected; snprintf(dr->mac, sizeof dr->mac, "%s", mac); }
+    if(dr){ dr->connected = connected; snprintf(dr->mac, sizeof dr->mac, "%s", mac); snprintf(dr->name, sizeof dr->name, "%s", name ? name : ""); }
     lv_obj_add_event_cb(r, dev_cb, LV_EVENT_CLICKED, dr);
     lv_obj_add_event_cb(r, row_free_cb, LV_EVENT_DELETE, dr);
 
@@ -1203,7 +1246,17 @@ static void add_dev_row(const char *mac, const char *name, int connected, const 
     lv_obj_set_style_text_font(sl, TH_F_DETAIL, 0);
     lv_obj_set_style_text_color(sl, connected ? (th_null()?TC(TEXT_PRIMARY):ui_current_accent()) : TC(TEXT_SECONDARY), 0);
     if(connected){ lv_obj_t *ch = lv_label_create(r); lv_label_set_text(ch, LV_SYMBOL_RIGHT);   /* opens its details */
-                   lv_obj_align(ch, LV_ALIGN_RIGHT_MID, -16, 0); lv_obj_set_style_text_color(ch, TC(TEXT_DISABLED), 0); }
+                   lv_obj_align(ch, LV_ALIGN_RIGHT_MID, -16, 0); lv_obj_set_style_text_color(ch, TC(TEXT_DISABLED), 0);
+                   if(th_zune()) lv_obj_add_flag(ch, LV_OBJ_FLAG_HIDDEN); }
+    if(th_zune()){                                              /* Figma 46: device icon, name, "connected · ldac" / "tap to connect" */
+        zune_radio_row(r, t, NULL, connected);
+        lv_obj_set_pos(t, 44, 4); lv_obj_set_width(t, 220); lv_obj_set_pos(ic, 14, 14);
+        char lo[48]; snprintf(lo, sizeof lo, "connected%s%s", (codec && codec[0]) ? " \xC2\xB7 " : "", (codec && codec[0]) ? codec : "");
+        for(char *c = lo; *c; c++) if(*c >= 'A' && *c <= 'Z') *c += 32;
+        lv_label_set_text(sl, connected ? lo : "tap to connect");
+        LV_FONT_DECLARE(font_zune_regular_12)
+        lv_obj_set_style_text_font(sl, zune_font(&font_zune_regular_12), 0); lv_obj_set_pos(sl, 46, 30); kit_keep(sl); kit_keep(ic);
+    }
 }
 
 /* Show only real AUDIO devices (bluez Icon = audio-card / audio-headset / ...),
@@ -1594,6 +1647,7 @@ void bt_create(lv_obj_t *root){
     hdr_set(BT_OFF, "Bluetooth", "");
     if(th_simple())simple_radio_skin(g_hring,g_hglyph,g_hname,g_hsub,g_sw,rb,g_list);
     if(th_null())null_radio_skin(root,"BLUETOOTH",g_hring,g_hglyph,g_hname,g_hsub,g_sw,rb,g_list);
+    if(th_zune())zune_radio_skin(root,"bluetooth","bluetooth on","scan for devices",g_hring,g_hglyph,g_hname,g_hsub,g_sw,rb,g_list);
     if(th_braun()){
         lv_obj_add_flag(g_hring, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(g_hglyph, LV_OBJ_FLAG_HIDDEN);
         lv_obj_t *pd = br_disc(root, 180, 80, 44, BR_PANEL); (void)pd;

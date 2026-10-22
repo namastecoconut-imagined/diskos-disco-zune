@@ -20,6 +20,11 @@
 #include "musicdb.h"
 #include "ipc.h"
 #include "config.h"
+#include "theme_kit.h"
+#include "zune_dial.h"
+LV_FONT_DECLARE(font_zune_light_21)
+LV_FONT_DECLARE(font_zune_regular_19)
+LV_FONT_DECLARE(font_zune_regular_13)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -362,10 +367,17 @@ static void play_cb(lv_event_t *e){ (void)e; if(g_qn > 0) queue_jump(0); }
 static void shuffle_cb(lv_event_t *e){ (void)e; if(g_qn > 1){ queue_shuffle(); ui_toast("Queue shuffled"); } }
 static void clear_cb(lv_event_t *e){
     (void)e; lv_obj_t *l = lv_obj_get_child(g_clear_btn, 1);
-    if(!g_qn) return;
-    if(!g_clear_armed || lv_tick_elaps(g_clear_armed) > 3000){ g_clear_armed = lv_tick_get(); if(l) lv_label_set_text(l, "Sure?"); return; }
-    g_clear_armed = 0; if(l) lv_label_set_text(l, "Clear");
-    queue_clear(); ui_toast("Queue cleared");
+    track_state_t cst; ipc_get_state(&cst);
+    if(!g_qn && !cst.have_track) return;                 /* a lone playing song can be cleared too */
+    if(!g_clear_armed || lv_tick_elaps(g_clear_armed) > 3000){ g_clear_armed = lv_tick_get(); if(l) lv_label_set_text(l, th_zune() ? "sure?" : "Sure?"); return; }
+    g_clear_armed = 0; if(l) lv_label_set_text(l, th_zune() ? "clear" : "Clear");
+    queue_clear();
+    if(cst.have_track){                                   /* clear everything: stop the song too, now playing empties */
+        if(ui_is_playing()) ipc_send_cmd("0201000C0000");
+        ipc_dismiss_track();
+        ui_toast(th_zune() ? "cleared" : "Cleared");
+        view_reload();
+    } else ui_toast("Queue cleared");
 }
 static void row_cb(lv_event_t *e){ int i = (int)(intptr_t)lv_event_get_user_data(e); queue_jump(i); }
 /* reorder: press the handle and drag; rows move live (children reordered, nothing recreated) */
@@ -403,17 +415,29 @@ static lv_obj_t *section(const char *t){
 }
 static void row_size_cb(lv_event_t *e){
     lv_obj_t *r = lv_event_get_target(e);
-    int now = (int)(intptr_t)lv_event_get_user_data(e), x = now ? 48 : 22;
-    int w = lv_obj_get_width(r) - x - (now ? 22 : 64);
+    int now = (int)(intptr_t)lv_event_get_user_data(e), x = (now && !th_zune()) ? 48 : 22;
+    int w = lv_obj_get_width(r) - x - (now ? (th_zune() ? 44 : 22) : 64);
     if(w < 32) w = 32;
     lv_obj_set_width(lv_obj_get_child(r, now ? 1 : 0), w);
     lv_obj_set_width(lv_obj_get_child(r, now ? 2 : 1), w);
 }
 static void separator(void){
+    if(th_zune()) return;                                       /* Zune: the colour sets the playing song apart */
     lv_obj_t *r = lv_obj_create(g_list); lv_obj_remove_style_all(r);
     lv_obj_set_size(r, QW - 32, 1);
     lv_obj_set_style_bg_color(r, TC(BORDER), 0); lv_obj_set_style_bg_opa(r, LV_OPA_COVER, 0);
     lv_obj_clear_flag(r, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+}
+/* Zune (Figma 15): rows as text on black - the playing song in magenta with three small bars, the rest in Light 20
+ * with the artist small and grey under it, each with its drag handle */
+static void zrow_bars(lv_obj_t *r){
+    static const int H[3] = { 10, 16, 7 };
+    for(int k = 0; k < 3; k++){
+        lv_obj_t *b = lv_obj_create(r); lv_obj_remove_style_all(b);
+        lv_obj_set_size(b, 3, H[k]); lv_obj_align(b, LV_ALIGN_RIGHT_MID, -(24 - k * 5), 8 - H[k] / 2);
+        lv_obj_set_style_bg_color(b, TC(ACCENT_PRIMARY), 0); lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(b, 1, 0); lv_obj_remove_flag(b, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    }
 }
 static lv_obj_t *qrow(const char *t, const char *a, int now, int idx){
     lv_obj_t *r = lv_button_create(g_list);
@@ -445,6 +469,27 @@ static lv_obj_t *qrow(const char *t, const char *a, int now, int idx){
         lv_obj_set_style_text_color(g, TC(QUEUE_HANDLE), 0); lv_obj_center(g);
     }
     lv_obj_add_event_cb(r, row_size_cb, LV_EVENT_SIZE_CHANGED, (void *)(intptr_t)now);
+    if(th_zune()){
+        lv_obj_set_height(r, 56);
+        lv_obj_set_style_bg_opa(r, LV_OPA_TRANSP, 0); lv_obj_set_style_border_width(r, 0, 0); lv_obj_set_style_radius(r, 8, 0);
+        lv_obj_set_style_bg_color(r, TC(SURFACE), LV_STATE_PRESSED); lv_obj_set_style_bg_opa(r, LV_OPA_COVER, LV_STATE_PRESSED);
+        uint32_t n = lv_obj_get_child_count(r);
+        lv_obj_t *tl = NULL, *al = NULL;
+        for(uint32_t k = 0; k < n; k++){ lv_obj_t *c = lv_obj_get_child(r, k);
+            if(!lv_obj_check_type(c, &lv_label_class)) continue;
+            if(now && k == 0){ lv_obj_add_flag(c, LV_OBJ_FLAG_HIDDEN); continue; }      /* the speaker icon: bars instead */
+            if(!tl) tl = c; else if(!al) al = c; }
+        if(tl){ lv_obj_set_pos(tl, 22, 6); lv_obj_set_height(tl, 28); lv_label_set_long_mode(tl, LV_LABEL_LONG_DOT);
+                lv_obj_set_style_text_font(tl, now ? zune_font(&font_zune_regular_19) : zune_font(&font_zune_light_21), 0);
+                lv_obj_set_style_text_color(tl, now ? TC(ACCENT_PRIMARY) : TC(TEXT_PRIMARY), 0); }
+        if(al){ lv_obj_set_pos(al, 22, 33); lv_obj_set_height(al, 18); lv_label_set_long_mode(al, LV_LABEL_LONG_DOT);
+                lv_obj_set_style_text_font(al, zune_font(&font_zune_regular_13), 0); lv_obj_set_style_text_color(al, TC(TEXT_MUTED), 0); }
+        if(now) zrow_bars(r);
+        else { lv_obj_t *h = lv_obj_get_child(r, -1); if(h){ lv_obj_set_size(h, 26, 56); lv_obj_align(h, LV_ALIGN_RIGHT_MID, -14, 0);
+               lv_obj_set_ext_click_area(h, 14);                   /* narrow: the kit leaves it as a plain glyph */
+               lv_obj_t *g = lv_obj_get_child(h, 0); if(g) lv_obj_set_style_text_color(g, TC(TEXT_MUTED), 0); } }
+        lv_obj_set_user_data(r, NULL);                       /* let the curve size it afresh */
+    }
     return r;
 }
 static void queue_position_cb(lv_event_t *e){
@@ -472,12 +517,13 @@ static void view_reload(void){
     snprintf(g_summary,sizeof g_summary,"%s",b);
     lv_anim_delete(g_sub,queue_hint_exec);lv_obj_set_style_text_opa(g_sub,LV_OPA_COVER,0);
     lv_label_set_text(g_sub, b);
+    track_state_t st; ipc_get_state(&st);
     lv_obj_t *controls[] = {g_play_btn, g_shuffle_btn, g_clear_btn};
     for(int i=0;i<3;i++) if(controls[i]){
-        if(g_qn > (i==1?1:0)) lv_obj_remove_state(controls[i], LV_STATE_DISABLED);
+        int on = i == 2 ? (g_qn > 0 || st.have_track) : g_qn > (i==1?1:0);   /* clear also stops a lone playing song */
+        if(on) lv_obj_remove_state(controls[i], LV_STATE_DISABLED);
         else lv_obj_add_state(controls[i], LV_STATE_DISABLED);
     }
-    track_state_t st; ipc_get_state(&st);
     if(st.have_track){
         mdb_song_t s; int have = mdb_song_by_path(st.path, &s);
         qrow(st.title[0] ? st.title : (have ? s.title : "-"), st.artist[0] ? st.artist : (have ? s.artist : ""), 1, -1);
@@ -488,7 +534,7 @@ static void view_reload(void){
     if(!g_qn && !st.have_track) section("Nothing queued");
     lv_obj_update_layout(g_list); curvelist_update(&g_cl);
 }
-void queue_refresh(void){ g_clear_armed = 0; if(g_clear_btn){ lv_obj_t *l = lv_obj_get_child(g_clear_btn, 1); if(l) lv_label_set_text(l, "Clear"); } view_reload(); }
+void queue_refresh(void){ g_clear_armed = 0; if(g_clear_btn){ lv_obj_t *l = lv_obj_get_child(g_clear_btn, 1); if(l) lv_label_set_text(l, th_zune() ? "clear" : "Clear"); } view_reload(); }
 static lv_obj_t *pill(const char *icon, const char *t, int x, int w, lv_event_cb_t cb, int accent){
     lv_obj_t *b = lv_button_create(g_root);
     lv_obj_remove_style_all(b);
@@ -543,6 +589,39 @@ void queue_create(lv_obj_t *root){
     lv_obj_set_scroll_dir(g_list, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(g_list, LV_SCROLLBAR_MODE_OFF);
     lv_obj_add_flag(g_list, LV_OBJ_FLAG_SCROLL_MOMENTUM);
+    if(th_zune()){
+        lv_obj_add_flag(hb, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(g_sub, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(g_play_btn, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(g_shuffle_btn, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(g_clear_btn, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_pos(g_list, 0, 108); lv_obj_set_size(g_list, 360, 252);
+        lv_obj_set_style_pad_row(g_list, 0, 0); lv_obj_set_style_pad_top(g_list, 10, 0); lv_obj_set_style_pad_bottom(g_list, 96, 0);
+        for(int k = 0; k < 2; k++){                                           /* fades: top and bottom */
+            lv_obj_t *f = lv_obj_create(root); lv_obj_remove_style_all(f); kit_keep(f);
+            lv_obj_set_size(f, 360, k ? 104 : 118); lv_obj_align(f, k ? LV_ALIGN_BOTTOM_MID : LV_ALIGN_TOP_MID, 0, 0);
+            lv_obj_set_style_bg_color(f, TC(CANVAS), 0); lv_obj_set_style_bg_grad_color(f, TC(CANVAS), 0);
+            lv_obj_set_style_bg_grad_dir(f, LV_GRAD_DIR_VER, 0); lv_obj_set_style_bg_opa(f, LV_OPA_COVER, 0);
+            lv_obj_set_style_bg_main_opa(f, k ? LV_OPA_TRANSP : LV_OPA_COVER, 0); lv_obj_set_style_bg_grad_opa(f, k ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+            lv_obj_set_style_bg_main_stop(f, k ? 0 : 140, 0); lv_obj_set_style_bg_grad_stop(f, k ? 150 : 255, 0);
+            lv_obj_remove_flag(f, LV_OBJ_FLAG_CLICKABLE);
+        }
+        zune_pivot(root, "up next", NULL);
+        zune_status(root, SCR_QUEUE);
+        /* shuffle + clear as two quiet links at the bottom (clear asks "sure?" first, as before) */
+        const char *lt[2] = { "shuffle", "clear" }; lv_event_cb_t lc[2] = { shuffle_cb, clear_cb };
+        for(int k = 0; k < 2; k++){
+            lv_obj_t *o = lv_obj_create(root); lv_obj_remove_style_all(o); kit_keep(o);
+            lv_obj_set_size(o, LV_SIZE_CONTENT, 24); lv_obj_align(o, LV_ALIGN_TOP_MID, k ? 38 : -38, 324);
+            lv_obj_add_flag(o, LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE); lv_obj_set_ext_click_area(o, 10);
+            lv_obj_set_style_opa(o, LV_OPA_40, LV_STATE_DISABLED);
+            lv_obj_t *ic = lv_label_create(o); lv_label_set_text(ic, ""); lv_obj_add_flag(ic, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_t *l = lv_label_create(o); lv_label_set_text(l, lt[k]); kit_keep(l);
+            lv_obj_set_style_text_font(l, TF(UI_14), 0); lv_obj_set_style_text_color(l, k ? TC(ACCENT_PRIMARY) : TC(TEXT_PRIMARY), 0);
+            lv_obj_add_event_cb(o, lc[k], LV_EVENT_CLICKED, NULL);
+            if(k) g_clear_btn = o; else g_shuffle_btn = o;
+        }
+        g_play_btn = NULL;
+        curvelist_attach(&g_cl, g_list, root, 340);
+        for(int k = 0; k < 11; k++) if(g_cl.dot[k]) lv_obj_add_flag(g_cl.dot[k], LV_OBJ_FLAG_HIDDEN);   /* Zune: no position dots */
+    } else
     curvelist_attach(&g_cl, g_list, root, QW);
     lv_obj_add_event_cb(g_list,queue_position_cb,LV_EVENT_SCROLL,NULL);
     lv_obj_add_event_cb(g_list,queue_position_cb,LV_EVENT_SCROLL_END,NULL);

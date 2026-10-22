@@ -8,6 +8,11 @@
 #include "config.h"
 #include "lrc.h"
 #include "braun.h"
+#include "zune_dial.h"
+#include "theme_kit.h"
+LV_FONT_DECLARE(font_zune_light_40)
+LV_FONT_DECLARE(font_zune_light_32)
+LV_FONT_DECLARE(font_zune_light_18)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -285,9 +290,61 @@ static void start_fetch(void)
     }
 }
 
+/* ---- Zune (Figma 12 + 67): the line being sung, huge and centred, the next one small under it; untimed lyrics as an
+ * even list under "LYRICS · NOT SYNCED"; no lyrics as one quiet line and a hint. The rim keeps the track progress. ---- */
+static lv_obj_t *g_zcur, *g_znext, *g_zbig, *g_zhint, *g_ztop;
+static int g_zcur_i = -3;
+static void z_show(lv_obj_t *o, int on){ if(o){ if(on) lv_obj_remove_flag(o, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN); } }
+static void z_top(const char *t, int caps){
+    if(!g_ztop) return;
+    lv_label_set_text(g_ztop, t);
+    lv_obj_set_style_text_font(g_ztop, caps ? TF(UI_10) : TF(UI_12), 0);
+    lv_obj_set_style_text_letter_space(g_ztop, caps ? 2 : 0, 0);
+}
+static void z_message(const char *big, const char *hint){        /* no lyrics, nothing playing, still looking */
+    z_show(g_scroll, 0); z_show(g_zcur, 0); z_show(g_znext, 0);
+    z_show(g_zbig, 1); z_show(g_zhint, hint && hint[0]);
+    lv_label_set_text(g_zbig, big); if(hint) lv_label_set_text(g_zhint, hint);
+    z_top(g_identity_title[0] ? g_identity_title : "", 0);
+}
+static void z_message_for(const char *txt){                       /* the stock status strings, in Zune's words */
+    if(!txt) txt = "";
+    if(strstr(txt, "No lyrics"))          z_message("no lyrics", "put a .lrc file with the same name next to the song");
+    else if(strstr(txt, "unavailable"))   z_message("no lyrics", "couldn't load lyrics for this song");
+    else if(strstr(txt, "No track"))      z_message("nothing playing", "");
+    else if(strstr(txt, "online"))        z_message("lyrics", "searching online\xE2\x80\xA6");
+    else                                  z_message("lyrics", "checking the sd card\xE2\x80\xA6");
+}
+static void z_plain(const char *txt){                             /* untimed: the whole text as one even list */
+    z_show(g_zbig, 0); z_show(g_zhint, 0); z_show(g_zcur, 0); z_show(g_znext, 0); z_show(g_scroll, 1);
+    if(g_text){ lv_obj_remove_flag(g_text, LV_OBJ_FLAG_HIDDEN); lv_label_set_text(g_text, txt); }
+    if(g_scroll) lv_obj_scroll_to_y(g_scroll, 0, LV_ANIM_OFF);
+    z_top("LYRICS \xC2\xB7 NOT SYNCED", 1);
+}
+static void z_timed_paint(int idx){                               /* the current line and the next */
+    if(!g_zcur || idx == g_zcur_i) return;
+    g_zcur_i = idx;
+    const char *cur = (idx >= 0 && idx < g_nll) ? g_ltext + g_ll[idx].text : "";
+    const char *nxt = (idx + 1 >= 0 && idx + 1 < g_nll) ? g_ltext + g_ll[idx + 1].text : "";
+    if(idx < 0) cur = "\xE2\x80\xA6";                          /* before the first line: a quiet ellipsis */
+    if(!cur[0]) cur = "\xE2\x80\xA6";                          /* an instrumental gap */
+    const lv_font_t *big = zune_font(&font_zune_light_40);
+    lv_point_t sz; lv_text_get_size(&sz, cur, big, -1, 0, 270, LV_TEXT_FLAG_NONE);
+    if(sz.y > 2 * lv_font_get_line_height(big)) big = zune_font(&font_zune_light_32);   /* a long line: one size down */
+    lv_obj_set_style_text_font(g_zcur, big, 0);
+    lv_label_set_text(g_zcur, cur);
+    lv_label_set_text(g_znext, nxt);
+    lv_obj_update_layout(g_zcur);
+    lv_obj_align(g_zcur, LV_ALIGN_CENTER, 0, -14);
+    lv_obj_align_to(g_znext, g_zcur, LV_ALIGN_OUT_BOTTOM_MID, 0, 16);
+}
+
 /* block-text mode: one label (status messages, untimed lyrics) */
+static int g_zplain_next;                                          /* Zune: the next show_text is lyrics, not a message */
 static void show_text(const char *txt)
 {
+    if(th_zune()){ int plain = g_zplain_next; g_zplain_next = 0; g_nll = 0; g_lcur = -2; g_zcur_i = -3;
+                   if(plain) z_plain(txt); else z_message_for(txt); return; }
     g_nll = 0; g_lcur = -2;
     if(g_lines_box){ lv_obj_clean(g_lines_box); lv_obj_add_flag(g_lines_box, LV_OBJ_FLAG_HIDDEN); }
     if(g_text){ lv_obj_remove_flag(g_text, LV_OBJ_FLAG_HIDDEN); lv_label_set_text(g_text, txt); }
@@ -300,8 +357,15 @@ static int show_timed(const char *lrc)
     int synced = 0;
     int n = lrc_parse(lrc, g_ll, LY_MAXL, g_ltext, sizeof g_ltext, g_lplain, sizeof g_lplain, &synced);
     if(!synced || !g_lines_box){
+        g_zplain_next = g_lplain[0] != 0;
         show_text(g_lplain[0] ? g_lplain : "No lyrics found.");
         return 0;
+    }
+    if(th_zune()){                                     /* Zune: two labels follow the position instead of a list */
+        g_nll = n; g_lcur = -2; g_zcur_i = -3; g_holding = 0;
+        z_show(g_scroll, 0); z_show(g_zbig, 0); z_show(g_zhint, 0); z_show(g_zcur, 1); z_show(g_znext, 1);
+        z_top("", 0); z_timed_paint(-1);
+        return 1;
     }
     lv_obj_clean(g_lines_box);
     for(int i = 0; i < n; i++){
@@ -337,6 +401,7 @@ static long lyrics_position(void)
 /* highlight the line at the playback position and keep it in the middle */
 static void lyrics_follow(void)
 {
+    if(th_zune()){ if(g_nll) z_timed_paint(lrc_index_at(g_ll, g_nll, lyrics_position())); return; }
     if(!g_nll || !g_lines_box) return;
     int idx = lrc_index_at(g_ll, g_nll, lyrics_position());
     if(idx != g_lcur){
@@ -433,7 +498,8 @@ void lyrics_poll(lv_timer_t *t)
     pthread_mutex_unlock(&g_ly_mu);
     if(!ready){
         /* still fetching: reflect the phase so the wait isn't a silent "Checking SD card..." */
-        if(inflight && g_text) lv_label_set_text(g_text, phase ? "Searching online..." : "Checking SD card...");
+        if(inflight && th_zune()) z_message_for(phase ? "Searching online..." : "Checking SD card...");
+        else if(inflight && g_text) lv_label_set_text(g_text, phase ? "Searching online..." : "Checking SD card...");
         return;
     }
     if(done == g_req){
@@ -442,7 +508,7 @@ void lyrics_poll(lv_timer_t *t)
         /* result is for the current track; g_lbuf is visible (published under the lock)
          * and no worker is running, so reading it here is race-free. */
         if(g_lkind == 2){ if(show_timed(g_lbuf) && on) lyrics_follow(); }
-        else show_text(g_lbuf);
+        else { g_zplain_next = g_lkind == 1; show_text(g_lbuf); }
     } else if(g_path[0] || g_q_title[0]){
         /* finished fetch was for a superseded track - fetch the current one
          * (start_fetch no-ops if a newer fetch is already running). */
@@ -456,7 +522,7 @@ void lyrics_create(lv_obj_t *root)
     lv_obj_set_style_bg_color(root, TC(CANVAS), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
 
-    ui_header(root, "Lyrics");   /* shared standard header */
+    if(!th_zune()) ui_header(root, "Lyrics");   /* shared standard header (Zune: none - the lyrics own the screen) */
 
     g_scroll = lv_obj_create(root);
     lv_obj_remove_style_all(g_scroll);
@@ -492,6 +558,47 @@ void lyrics_create(lv_obj_t *root)
     lv_obj_add_flag(g_lines_box,LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_event_cb(g_scroll,scroll_cb,LV_EVENT_PRESSED,NULL);
     lv_obj_add_event_cb(g_scroll,scroll_cb,LV_EVENT_SCROLL_BEGIN,NULL);
+    if(th_zune()){
+        lv_obj_set_pos(g_scroll, 30, 56); lv_obj_set_size(g_scroll, 300, 270);       /* the untimed list */
+        lv_obj_set_style_pad_top(g_scroll, 22, 0); lv_obj_set_style_pad_bottom(g_scroll, 80, 0);
+        lv_obj_set_width(g_text, 300);
+        lv_obj_set_style_text_font(g_text, zune_font(&font_zune_light_18), 0);
+        lv_obj_set_style_text_color(g_text, TC(TEXT_PRIMARY), 0);
+        lv_obj_set_style_text_line_space(g_text, 12, 0);
+        for(int k = 0; k < 2; k++){                                                  /* fades over the list's ends */
+            lv_obj_t *f = lv_obj_create(root); lv_obj_remove_style_all(f); kit_keep(f);
+            lv_obj_set_size(f, 360, k ? 70 : 90); lv_obj_align(f, k ? LV_ALIGN_BOTTOM_MID : LV_ALIGN_TOP_MID, 0, 0);
+            lv_obj_set_style_bg_color(f, TC(CANVAS), 0); lv_obj_set_style_bg_grad_color(f, TC(CANVAS), 0);
+            lv_obj_set_style_bg_grad_dir(f, LV_GRAD_DIR_VER, 0); lv_obj_set_style_bg_opa(f, LV_OPA_COVER, 0);
+            lv_obj_set_style_bg_main_opa(f, k ? LV_OPA_TRANSP : LV_OPA_COVER, 0); lv_obj_set_style_bg_grad_opa(f, k ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+            lv_obj_remove_flag(f, LV_OBJ_FLAG_CLICKABLE);
+        }
+        zune_rim(root, SCR_LYRICS, 1);                                               /* above the fades */
+        g_ztop = lv_label_create(root); lv_label_set_text(g_ztop, "");
+        lv_obj_set_width(g_ztop, 220); lv_label_set_long_mode(g_ztop, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_align(g_ztop, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(g_ztop, TC(TEXT_MUTED), 0); lv_obj_align(g_ztop, LV_ALIGN_TOP_MID, 0, 38);
+        g_zcur = lv_label_create(root); lv_label_set_text(g_zcur, "");
+        lv_obj_set_width(g_zcur, 270); lv_label_set_long_mode(g_zcur, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_align(g_zcur, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_letter_space(g_zcur, -1, 0);
+        lv_obj_set_style_text_color(g_zcur, TC(TEXT_PRIMARY), 0);
+        g_znext = lv_label_create(root); lv_label_set_text(g_znext, "");
+        lv_obj_set_width(g_znext, 280); lv_label_set_long_mode(g_znext, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_align(g_znext, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_font(g_znext, zune_font(TF(UI_14)), 0); lv_obj_set_style_text_color(g_znext, TC(TEXT_MUTED), 0);
+        g_zbig = lv_label_create(root); lv_label_set_text(g_zbig, "");
+        lv_obj_set_style_text_font(g_zbig, zune_font(&font_zune_light_32), 0); lv_obj_set_style_text_color(g_zbig, TC(TEXT_PRIMARY), 0);
+        lv_obj_align(g_zbig, LV_ALIGN_TOP_MID, 0, 138);
+        g_zhint = lv_label_create(root); lv_label_set_text(g_zhint, "");
+        lv_obj_set_width(g_zhint, 220); lv_label_set_long_mode(g_zhint, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_align(g_zhint, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_font(g_zhint, TF(UI_12), 0); lv_obj_set_style_text_color(g_zhint, TC(TEXT_MUTED), 0);
+        lv_obj_align(g_zhint, LV_ALIGN_TOP_MID, 0, 188);
+        z_show(g_zcur, 0); z_show(g_znext, 0); z_show(g_scroll, 0);
+        lv_obj_t *own[] = { g_scroll, g_text, g_ztop, g_zcur, g_znext, g_zbig, g_zhint };
+        for(unsigned i = 0; i < sizeof own / sizeof own[0]; i++) kit_keep(own[i]);
+    }
 }
 
 /* B's parser handles offsets, enhanced tags and stable repeated timestamps for A's three-line renderer. */

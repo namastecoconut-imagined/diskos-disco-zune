@@ -116,6 +116,13 @@ static void toggle(mp_host_t *h, lv_obj_t *r, int i){
     set_title(h);
     if(h->cnt == 0) mp_exit(h);                                             /* nothing ticked any more: back to normal */
 }
+void mp_start(mp_host_t *h, int index){                                    /* start picking with this item ticked (the hold menu's Select) */
+    if(!h || h->on) return;
+    lv_obj_t *row = NULL;
+    for(uint32_t k = 0; h->list && k < lv_obj_get_child_count(h->list); k++){
+        lv_obj_t *r = lv_obj_get_child(h->list, (int32_t)k); if(row_index(r) == index){ row = r; break; } }
+    toggle(h, row, index);
+}
 /* ---- the row gestures -------------------------------------------------------------------------------------- */
 static uint32_t g_sw_t; static lv_point_t g_sw_p; static int g_sw_done;
 static void row_cb(lv_event_t *e){
@@ -127,6 +134,7 @@ static void row_cb(lv_event_t *e){
     if(c == LV_EVENT_PRESSED){ if(in) lv_indev_get_point(in, &g_sw_p); g_sw_done = 0; g_sw_t = lv_tick_get(); return; }
     if(c == LV_EVENT_PRESSING){
         if(g_sw_done || !in || (h->can_pick && !h->can_pick())) return;
+        if(th_zune() && !h->on) return;                                    /* Zune: a sideways swipe turns the pivot; picking starts from the hold menu */
         if(g_sw_p.x < MP_EDGE || g_sw_p.x > 360 - MP_EDGE) return;         /* edge strips: back swipe / navigation circle */
         lv_point_t p; lv_indev_get_point(in, &p);
         int dx = p.x - g_sw_p.x, dy = p.y - g_sw_p.y;

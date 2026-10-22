@@ -86,3 +86,9 @@ diskos-update/
 
 # Owner-specific Navidrome credentials
 shelf.conf
+
+# --- editor / patch leftovers ---
+*.orig
+*.zorig
+*.orig[0-9]
+*.rej

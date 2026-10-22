@@ -59,6 +59,7 @@ void songmenu_open_song(const char *path);   /* Library long-press on a song */
 void songmenu_open_file(const char *dir, const char *name, void (*done)(void));   /* folder browser: a song file */
 void songmenu_open_folder(const char *dir, const char *name, void (*done)(void)); /* folder browser: a folder */
 void songmenu_open_group(const char *col, const char *val, const char *title, void (*play)(int shuffle));   /* Library: album / artist / genre (fork) */
+void songmenu_offer_select(void (*fn)(void));   /* Zune: the next hold menu offers "select" (start picking) */
 void fileops_action(const char *dir, const char *name, int is_dir, void (*done)(void), int action);  /* 0 rename, 1 copy/move, 2 delete */
 void songinfo_show_song(const track_state_t *st);
 void songinfo_unpin(void);
@@ -340,6 +341,7 @@ void ui_cancel_book_resume(void);                      /* end the book session (
 void ui_book_user_seeked(long target_ms);              /* manual seek in a book: drop pending resume, persist target_ms to the bookmark now, keep session */
 int  ui_set_volume(int vol);   /* set absolute volume 0..VOL_MAX; returns 0=queued, -1=failed */
 void ui_set_workmode(int mode);
+void ui_np_set_playmode(int wm);   /* fork (Zune): set the play mode and repaint (its play-mode list) */
 int ui_apply_eq(int preset);
 int ui_eq_select(int preset);    /* central EQ apply+persist (eq_preset + eq_last); 0 ok, -1 send failed */
 int ui_is_playing(void);         /* authoritative normalized play state (for the drawer transport glyph) */

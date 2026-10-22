@@ -84,7 +84,51 @@ static void load(void){
     fclose(f);
 }
 /* from the 3 s status poll */
-void usage_note_battery(int pct, int charging){ if(pct >= 0 && pct <= 100){ g_batt = pct; g_chg = charging; } }
+static int left_minutes(void);
+/* Figma 63 (2%): a takeover counting 5 s down to a clean power-off; plugging in cancels it. Two readings in a row
+ * at 2% or under before it starts, so one odd reading can't turn the player off. */
+#include "zune_dial.h"
+static lv_timer_t *g_sd_t; static int g_sd_n;
+static void zsd_tick(lv_timer_t *t){
+    (void)t;
+    if(g_chg || usage_plugged_in() == 1){
+        lv_timer_delete(g_sd_t); g_sd_t = NULL; zune_takeover_close();
+        ui_toast_icon(LV_SYMBOL_CHARGE, ui_current_accent(), "plugged in \xC2\xB7 keep listening");
+        return;
+    }
+    if(--g_sd_n <= 0){ lv_timer_delete(g_sd_t); g_sd_t = NULL; zune_takeover_close(); ui_power_off(); return; }
+    char b[8]; snprintf(b, sizeof b, "%d", g_sd_n); zune_takeover_big(b);
+}
+void usage_shutdown_countdown(int pct){
+    if(g_sd_t) return;
+    char sub[64]; snprintf(sub, sizeof sub, "battery at %d%% \xC2\xB7 your place is saved", pct < 0 ? 2 : pct);
+    ztake_t z = { .icon = LV_SYMBOL_BATTERY_EMPTY, .icon_accent = 1, .ring_pct = pct < 1 ? 1 : pct, .title = "shutting down", .big = "5",
+                  .sub = sub, .note = "plug in to keep listening" };
+    zune_takeover(&z);
+    g_sd_n = 5; g_sd_t = lv_timer_create(zsd_tick, 1000, NULL);
+}
+static void zcrit_check(void){
+    static int seen;
+    if(!th_zune() || g_batt < 0) return;
+    if(g_chg || usage_plugged_in() == 1 || g_batt > 2){ seen = 0; return; }
+    if(++seen >= 2) usage_shutdown_countdown(g_batt);
+}
+/* Figma 63: a warning at 15% and again at 5% while on battery (once each per discharge; the charger re-arms them) */
+static void low_check(void){
+    static int warned = 100;                                   /* the lowest level already warned about */
+    if(g_batt < 0) return;
+    zcrit_check();
+    if(g_chg || usage_plugged_in() == 1){ if(g_batt > 16) warned = 100; return; }
+    int lvl = g_batt <= 5 ? 5 : g_batt <= 15 ? 15 : 100;
+    if(lvl >= warned || lvl == 100) return;
+    warned = lvl;
+    char b[96], d[24]; int m = left_minutes();
+    if(m > 0){ if(m >= 60) snprintf(d, sizeof d, "%dh %dm", m / 60, m % 60); else snprintf(d, sizeof d, "%dm", m);
+               snprintf(b, sizeof b, th_zune() ? "battery low \xC2\xB7 %d%% - about %s of playback" : "Battery low (%d%%) - about %s left", g_batt, d); }
+    else snprintf(b, sizeof b, th_zune() ? "battery low \xC2\xB7 %d%% - plug in soon" : "Battery low (%d%%) - plug in soon", g_batt);
+    ui_toast(b);
+}
+void usage_note_battery(int pct, int charging){ if(pct >= 0 && pct <= 100){ g_batt = pct; g_chg = charging; low_check(); } }
 int usage_charging(void){ return g_chg; }   /* the battery is being charged (positive charge current) */
 /* Plugged in: any power source other than the battery reports online=1 (USB, a charger: whatever the kernel calls it,
  * so no name is assumed). Catches a full battery on the charger, which draws no charge current. Read at most every
@@ -242,8 +286,10 @@ static void place_tip(int pct, lv_color_t c){
     lv_obj_set_style_bg_color(g_tip, c, 0); lv_obj_set_style_shadow_color(g_tip, c, 0);
     if(pct >= 0) lv_obj_remove_flag(g_tip, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(g_tip, LV_OBJ_FLAG_HIDDEN);
 }
+static int g_zu; static void zu_draw(void);
 static void draw(void){
     if(!g_pct) return;
+    if(g_zu){ zu_draw(); return; }
     int pct = g_batt >= 0 ? g_batt : (g_n ? at(g_n - 1)->pct : -1);
     char b[64];
     if(pct >= 0) snprintf(b, sizeof b, "%d%%", pct); else snprintf(b, sizeof b, "-");
@@ -310,7 +356,112 @@ static void cap_hold_cb(lv_event_t *e){
     draw();
 }
 static void us_tick_cb(lv_timer_t *t){ (void)t; if(screen_current() == SCR_USAGE) draw(); }
+/* ---- Zune: 09 charging / 57 battery. One ring from 12 o'clock, light figures, lowercase lines ---- */
+LV_FONT_DECLARE(font_zune_light_96) LV_FONT_DECLARE(font_zune_regular_14) LV_FONT_DECLARE(font_zune_regular_12)
+LV_FONT_DECLARE(font_zune_regular_13) LV_FONT_DECLARE(font_zune_semibold_11)
+static lv_obj_t *g_zu_cap, *g_zu_l1, *g_zu_l2, *g_zu_l3, *g_zu_lim, *g_zu_tick, *g_zu_tlab;
+static void zdur(char *b, size_t n, int m){
+    if(m < 60) snprintf(b, n, "%dm", m); else if(m % 60 == 0 || m >= 600) snprintf(b, n, "%dh", (m + 30) / 60);
+    else snprintf(b, n, "%dh %dm", m / 60, m % 60);
+}
+static lv_obj_t *zu_lab(lv_obj_t *root, const lv_font_t *f, lv_color_t c, int y){
+    lv_obj_t *l = lv_label_create(root); lv_label_set_text(l, "");
+    lv_obj_set_width(l, 260); lv_label_set_long_mode(l, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(l, zune_font(f), 0); lv_obj_set_style_text_color(l, c, 0);
+    lv_obj_align(l, LV_ALIGN_TOP_MID, 0, y); return l;
+}
+static void zu_draw(void){
+    int pct = g_batt >= 0 ? g_batt : (g_n ? at(g_n - 1)->pct : -1);
+    int lim = simple_cfg_get_int("charge_protect", 0);
+    char b[80], d[24];
+    if(pct >= 0) snprintf(b, sizeof b, "%d%%", pct); else snprintf(b, sizeof b, "-");
+    lv_label_set_text(g_pct, b);
+    lv_arc_set_value(g_ring, pct >= 0 ? pct : 0);
+    lv_color_t c = (!g_chg && pct >= 0 && pct <= 15) ? TC(STATUS_DANGER) : TC(ACCENT_PRIMARY);
+    lv_obj_set_style_arc_color(g_ring, c, LV_PART_INDICATOR);
+    if(lim){ lv_obj_remove_flag(g_zu_tick, LV_OBJ_FLAG_HIDDEN); } else lv_obj_add_flag(g_zu_tick, LV_OBJ_FLAG_HIDDEN);
+    int plugged = !g_chg && usage_plugged_in() == 1;       /* on the charger but drawing nothing: full, or held at 80% */
+    if(g_chg || plugged){
+        lv_obj_add_flag(g_zu_cap, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(g_chg_ic, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(g_zu_l2, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(g_zu_l3, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(g_zu_tlab, LV_OBJ_FLAG_HIDDEN);   /* the limit reads at the bottom: a side label crowded the figure */
+        if(lim) lv_obj_remove_flag(g_zu_lim, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(g_zu_lim, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_align(g_pct, LV_ALIGN_TOP_MID, 0, 96);
+        int target = lim ? 80 : 100, m = full_minutes(target);
+        if(plugged) snprintf(b, sizeof b, lim && pct >= 0 && pct >= 75 ? "plugged in · held at 80%%" : pct >= 96 ? "plugged in · full" : "plugged in · not charging");
+        else if(pct >= 0 && pct >= target - (lim ? 1 : 4)) snprintf(b, sizeof b, lim ? "charged · held at 80%%" : "charged · topping up");
+        else if(m < 0) snprintf(b, sizeof b, "charging · estimating time to full");
+        else { zdur(d, sizeof d, m < 1 ? 1 : m); snprintf(b, sizeof b, "charging · %s in %s", lim ? "80%" : "full", d); }
+        lv_label_set_text(g_zu_l1, b); lv_obj_align(g_zu_l1, LV_ALIGN_TOP_MID, 0, 204);
+        return;
+    }
+    lv_obj_remove_flag(g_zu_cap, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(g_chg_ic, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(g_zu_tlab, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(g_zu_l2, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(g_zu_l3, LV_OBJ_FLAG_HIDDEN);
+    if(lim) lv_obj_remove_flag(g_zu_lim, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(g_zu_lim, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(g_pct, LV_ALIGN_TOP_MID, 0, 88);
+    int m = left_minutes();
+    if(m == -1) snprintf(b, sizeof b, "estimating time left...");
+    else if(m == -2) snprintf(b, sizeof b, "barely draining lately");
+    else if(m >= 48 * 60) snprintf(b, sizeof b, "about %d days of playback left", (m / 60 + 12) / 24);
+    else { zdur(d, sizeof d, m >= 120 ? (m + 30) / 60 * 60 : m); snprintf(b, sizeof b, "about %s of playback left", d); }
+    lv_label_set_text(g_zu_l1, b); lv_obj_align(g_zu_l1, LV_ALIGN_TOP_MID, 0, 184);
+    time_t nowt = time(NULL); int play = -1, scr = -1;
+    if(nowt < 1600000000){ lv_label_set_text(g_zu_l2, "set the clock to see totals"); lv_label_set_text(g_zu_l3, ""); return; }
+    if(g_cy.full_at && g_cy.full_at <= (uint32_t)nowt){
+        lv_label_set_text(g_zu_l2, cfg_get_int("batt_manual", 0) ? "since reset" : "since full charge");
+        play = (int)g_cy.play_min; scr = (int)g_cy.scr_min;
+    } else {
+        lv_label_set_text(g_zu_l2, "last 24 hours");
+        uint32_t to = (uint32_t)nowt, from = to > 86400 ? to - 86400 : 0; play = scr = 0;
+        for(int i = 0; i < g_n; i++){ const usmp_t *s = at(i); if(s->t < from || s->t > to) continue; if(s->fl & FL_SCR) scr++; if(s->fl & FL_PLAY) play++; }
+    }
+    char p[24], s2[24]; zdur(p, sizeof p, play); zdur(s2, sizeof s2, scr);
+    snprintf(b, sizeof b, "%s playing · %s screen on", p, s2); lv_label_set_text(g_zu_l3, b);
+}
+static void zu_cap_hold_cb(lv_event_t *e);
+static void zusage_create(lv_obj_t *root){
+    g_zu = 1;
+    lv_obj_set_style_bg_color(root, TC(CANVAS), 0); lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);
+    g_ring = lv_arc_create(root); lv_obj_remove_style(g_ring, NULL, LV_PART_KNOB);
+    lv_obj_clear_flag(g_ring, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_size(g_ring, 344, 344); lv_obj_center(g_ring);
+    lv_arc_set_rotation(g_ring, 270); lv_arc_set_bg_angles(g_ring, 0, 360); lv_arc_set_range(g_ring, 0, 100);
+    lv_obj_set_style_arc_width(g_ring, 3, LV_PART_MAIN); lv_obj_set_style_arc_width(g_ring, 6, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(g_ring, false, LV_PART_MAIN); lv_obj_set_style_arc_rounded(g_ring, true, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(g_ring, TC(CONTROL_TRACK), LV_PART_MAIN);
+    /* the Charging Limit mark at 80% on the ring and its label just inside */
+    float a = (270.0f + 288.0f) * 3.14159265f / 180.0f;
+    g_zu_tick = lv_obj_create(root); lv_obj_remove_style_all(g_zu_tick); lv_obj_set_size(g_zu_tick, 8, 8);
+    lv_obj_set_style_radius(g_zu_tick, LV_RADIUS_CIRCLE, 0); lv_obj_set_style_bg_opa(g_zu_tick, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(g_zu_tick, TC(TEXT_PRIMARY), 0);
+    lv_obj_set_pos(g_zu_tick, 180 + (int)lroundf(cosf(a) * 170.5f) - 4, 180 + (int)lroundf(sinf(a) * 170.5f) - 4);
+    lv_obj_clear_flag(g_zu_tick, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    g_zu_tlab = lv_label_create(root); lv_label_set_text(g_zu_tlab, "limit 80%");
+    lv_obj_set_style_text_font(g_zu_tlab, zune_font(&font_zune_regular_12), 0); lv_obj_set_style_text_color(g_zu_tlab, TC(TEXT_MUTED), 0);
+    lv_obj_set_pos(g_zu_tlab, 180 + (int)lroundf(cosf(a) * 152), 180 + (int)lroundf(sinf(a) * 152) - 26);
+    g_zu_cap = zu_lab(root, &font_zune_semibold_11, TC(TEXT_MUTED), 70); lv_label_set_text(g_zu_cap, "BATTERY");
+    lv_obj_set_style_text_letter_space(g_zu_cap, 2, 0);
+    g_chg_ic = lv_label_create(root); lv_label_set_text(g_chg_ic, LV_SYMBOL_CHARGE);
+    lv_obj_set_style_text_font(g_chg_ic, TF(UI_20), 0); lv_obj_set_style_text_color(g_chg_ic, TC(ACCENT_PRIMARY), 0);
+    lv_obj_align(g_chg_ic, LV_ALIGN_TOP_MID, 0, 64);
+    g_pct = lv_label_create(root); lv_obj_set_style_text_font(g_pct, zune_font(&font_zune_light_96), 0);
+    lv_obj_set_style_text_color(g_pct, TC(TEXT_PRIMARY), 0);
+    g_zu_l1 = zu_lab(root, &font_zune_regular_14, TC(TEXT_SECONDARY), 184);
+    g_zu_l2 = zu_lab(root, &font_zune_regular_12, TC(TEXT_MUTED), 218);
+    lv_obj_add_flag(g_zu_l2, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_ext_click_area(g_zu_l2, 12);   /* hold: restart the totals */
+    lv_obj_add_event_cb(g_zu_l2, zu_cap_hold_cb, LV_EVENT_LONG_PRESSED, NULL);
+    g_zu_l3 = zu_lab(root, &font_zune_regular_13, TC(TEXT_PRIMARY), 236);
+    g_zu_lim = zu_lab(root, &font_zune_regular_12, TC(TEXT_MUTED), 276); lv_label_set_text(g_zu_lim, "charge limit 80%");
+    /* keep the stock statics non-NULL so shared code paths stay safe */
+    g_sub = g_sub2 = g_zu_l1; g_cap = g_zu_l2; g_play_v = g_scr_v = g_zu_l3;
+    if(!g_tmr) g_tmr = lv_timer_create(us_tick_cb, 30000, NULL);
+    draw();
+}
+static void zu_cap_hold_cb(lv_event_t *e){ cap_hold_cb(e); }
 void usage_create(lv_obj_t *root){
+    if(th_zune()){ zusage_create(root); return; }
     lv_obj_set_style_bg_color(root,TC(CANVAS),0);lv_obj_set_style_bg_opa(root,LV_OPA_COVER,0);
     lv_obj_clear_flag(root,LV_OBJ_FLAG_SCROLLABLE);
     if(th_braun())br_face(root);

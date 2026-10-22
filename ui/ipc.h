@@ -52,4 +52,5 @@ int  ipc_take_reconnected(void);       /* 1 (and clears) after a recovery reatta
 unsigned ipc_rx_frames(void);          /* count of /ui frames received from the player (>0 => player up) */
 int  ipc_player_mode(void);            /* last a607 player mode this gen: -1=none, 8=LOCALPLAYER (v2.40 oracle) */
 unsigned ipc_generation(void);         /* bumps on each /ui reattach (player restart) - v2.40 one-shot re-arm */
+void ipc_dismiss_track(void);   /* hide the paused current track (queue "clear everything") */
 #endif

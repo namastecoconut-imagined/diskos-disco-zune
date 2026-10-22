@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 diskOS contributors */
 #include "screens.h"
+#include "zune_dial.h"
 #include "braun.h"
 #include "theme.h"
 #include "null_theme.h"
@@ -58,6 +59,7 @@ static void start_scan(void);     /* fwd */
 static lv_obj_t *g_scan_icon;
 static void spin_anim_cb(void *o, int32_t v){ lv_obj_set_style_transform_rotation((lv_obj_t*)o, v, 0); }
 static void scan_stop(void){
+    if(th_zune()) zune_rim_spin(NULL, 0);
     if(g_scan_icon){ lv_anim_delete(g_scan_icon, spin_anim_cb); g_scan_icon = NULL; }
 }
 
@@ -433,6 +435,15 @@ static void list_msg_scanning(void){
     if(!g_list) return;
     scan_stop();
     lv_obj_clean(g_list);
+    if(th_zune()){                                      /* Figma 74: a line of help, the rim turning */
+        lv_obj_set_flex_align(g_list, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_t *t = lv_label_create(g_list); lv_label_set_text(t, "looking for networks\xE2\x80\xA6");
+        lv_label_set_long_mode(t, LV_LABEL_LONG_WRAP); lv_obj_set_width(t, 220);
+        lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(t, TC(TEXT_SECONDARY), 0); lv_obj_set_style_text_font(t, TF(UI_14), 0);
+        zune_rim_spin(lv_obj_get_screen(g_list), 1);
+        return;
+    }
     lv_obj_set_flex_align(g_list, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_t *row = lv_obj_create(g_list);
     lv_obj_remove_style_all(row);
@@ -542,14 +553,35 @@ static int wifi_net_temp_disabled(const char *list, int id){
     return 0;
 }
 
+static int g_conn_secure;                  /* the attempt in flight used a password (Zune: "try again" re-asks it) */
+static void psk_done(const char *text);
+static void wifi_connect(const char *ssid, const char *key);
+static void zwifi_retry(void){
+    if(g_conn_secure){
+        snprintf(g_pending_ssid, sizeof g_pending_ssid, "%s", g_conn_ssid);
+        char prompt[80]; snprintf(prompt, sizeof prompt, "Password for %s", g_conn_ssid);
+        kbinput_open_password(prompt, "", psk_done);
+    } else wifi_connect(g_conn_ssid, NULL);
+}
+static void zwifi_failed(const char *why){         /* Figma 45: accent cross, plain reason, try again / cancel */
+    int pw = strstr(why, "password") != NULL;
+    char sub[128];
+    if(pw) snprintf(sub, sizeof sub, "%s didn't accept it. check caps and try again.", g_conn_ssid);
+    else   snprintf(sub, sizeof sub, "%s didn't answer. move closer or try again.", g_conn_ssid);
+    ztake_t t = { .icon = LV_SYMBOL_CLOSE, .icon_ring = 64, .ring_pct = -1,
+                  .title = pw ? "wrong password" : "couldn't connect", .sub = sub,
+                  .l1 = "try again", .cb1 = zwifi_retry, .l2 = "cancel" };
+    zune_takeover(&t);
+}
 static void conn_fail(const char *why){
     lv_timer_del(g_conn_timer); g_conn_timer = NULL;
     /* connect failed: re-enable other nets IF the supplicant is still up; if it died,
      * leave g_sanitize_pending set so supervise sanitizes the fresh instance when it's up. */
     if(wifi_sanitize_savenets()) g_sanitize_pending = 0;
-    ui_toast(why);
+    if(th_zune() && why) zwifi_failed(why); else if(why) ui_toast(why);
     start_scan();
 }
+static void zwifi_cancel(void){ if(g_conn_timer) conn_fail(NULL); }
 static void conn_poll_cb(lv_timer_t *t){
     (void)t;
     char ss[64], ip[32];
@@ -560,7 +592,8 @@ static void conn_poll_cb(lv_timer_t *t){
         lv_timer_del(g_conn_timer); g_conn_timer = NULL;
         snprintf(g_cur_ssid, sizeof g_cur_ssid, "%s", g_conn_ssid);
         if(wifi_sanitize_savenets()) g_sanitize_pending = 0;   /* re-enable all + persist (supplicant is up here) */
-        ui_toast("Connected");
+        if(th_zune()){ zune_takeover_close(); char b[96]; snprintf(b, sizeof b, "connected to %s", g_conn_ssid); ui_toast_icon(LV_SYMBOL_WIFI, ui_current_accent(), b); }
+        else ui_toast("Connected");
         start_scan();                        /* refresh list so the joined net gets its ✓ */
         return;
     }
@@ -654,7 +687,12 @@ static void wifi_connect(const char *ssid, const char *key){
     /* don't claim success yet - poll for the real outcome (assoc + DHCP). */
     snprintf(g_conn_ssid, sizeof g_conn_ssid, "%s", ssid);
     g_conn_id = id;
-    ui_toast("Connecting...");
+    g_conn_secure = key && key[0];
+    if(th_zune()){
+        char sub[96]; snprintf(sub, sizeof sub, "to %s", ssid);
+        ztake_t t = { .icon = LV_SYMBOL_WIFI, .spin = 1, .ring_pct = -1, .title = "connecting", .sub = sub, .l1 = "cancel", .cb1 = zwifi_cancel };
+        zune_takeover(&t);
+    } else ui_toast("Connecting...");
     g_conn_start = lv_tick_get();
     g_conn_timer = lv_timer_create(conn_poll_cb, 1000, NULL);
 }
@@ -665,6 +703,7 @@ static void psk_done(const char *text){
 
 /* ---- details screen (SCR_WIFI_INFO) ------------------------------------- */
 static void info_row(const char *key, const char *val){
+    if(th_zune()){ zune_info_row(g_info_list, key, val); return; }
     lv_obj_t *r = lv_obj_create(g_info_list);
     lv_obj_remove_style_all(r);
     lv_obj_set_size(r, 250, 40);
@@ -690,6 +729,7 @@ static void info_back_cb(lv_event_t *e){ if(lv_event_get_code(e)==LV_EVENT_CLICK
 void wifi_info_create(lv_obj_t *root){
     lv_obj_set_style_bg_color(root, TC(CANVAS), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
+    if(th_zune()){ g_info_list = zune_info_page(root, "network", info_back_cb); return; }
     ui_header_cb(root, "Network", info_back_cb);   /* shared header */
     g_info_list = lv_obj_create(root);
     lv_obj_remove_style_all(g_info_list);
@@ -706,6 +746,7 @@ void wifi_info_create(lv_obj_t *root){
 
 /* A tappable destructive-action row appended to the details list (Forget). */
 static void info_action_row(const char *label, lv_event_cb_t cb){
+    if(th_zune()){ zune_info_action(g_info_list, label, cb, "wifi.cb"); return; }
     lv_obj_t *r = lv_button_create(g_info_list);
     lv_obj_remove_style_all(r);
     lv_obj_set_size(r, 250, 44);
@@ -778,7 +819,7 @@ void wifi_info_open(void){
     if(p){ int fr; if(sscanf(p+6,"%d",&fr)==1){ snprintf(val,sizeof val,"%d MHz", fr); info_row("Frequency", val);} }
     p = strstr(buf, "bssid=");
     if(p && sscanf(p+6, "%63[^\n]", val)==1){ info_row("BSSID", val); }   /* check sscanf: val was read uninitialized on no-match */
-    info_action_row("Forget This Network", wifi_forget_cb);   /* C05: remove the saved network */
+    info_action_row(th_zune() ? "forget network" : "Forget This Network", wifi_forget_cb);   /* C05: remove the saved network */
     screen_show(SCR_WIFI_INFO);
 }
 
@@ -874,6 +915,12 @@ static void add_net_row(const char *ssid, int signal, int secured, int connected
         lv_obj_set_style_bg_opa(body, LV_OPA_COVER, 0);
     }
     add_signal_bars(r, 232, 14, signal);
+    if(th_zune()){                                              /* Figma 44: name over "connected" / "secured" / "open" */
+        uint32_t n = lv_obj_get_child_count(r);
+        for(uint32_t k = 0; k < n; k++){ lv_obj_t *o = lv_obj_get_child(r, (int32_t)k); if(o != t && lv_obj_check_type(o, &lv_label_class)) lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN); }
+        zune_radio_row(r, t, connected ? "connected" : secured ? "secured" : "open", connected);
+        lv_obj_set_width(t, 200);
+    }
 }
 
 /* one de-duplicated network of a scan */
@@ -1135,6 +1182,7 @@ void wifi_create(lv_obj_t *root){
     hdr_set(WS_OFF, "Wi-Fi", "", 0);
     if(th_simple())simple_radio_skin(g_hring,g_hglyph,g_hname,g_hsub,g_sw,rb,g_list);
     if(th_null())null_radio_skin(root,"WI-FI",g_hring,g_hglyph,g_hname,g_hsub,g_sw,rb,g_list);
+    if(th_zune())zune_radio_skin(root,"wi-fi","wi-fi on","scan again",g_hring,g_hglyph,g_hname,g_hsub,g_sw,rb,g_list);
     if(th_braun()){
         lv_obj_add_flag(g_hring, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(g_hglyph, LV_OBJ_FLAG_HIDDEN);
         lv_obj_t *pd = br_disc(root, 180, 80, 44, BR_PANEL); (void)pd;
@@ -1171,3 +1219,10 @@ void wifi_open(void){
 
 /* Host preview fixture: not called by device code. */
 void wifi_preview_null(void){lv_obj_clean(g_list);hdr_set(WS_CONNECTED,"Disco Home","CONNECTED / -48 dBm",-48);lv_obj_add_state(g_sw,LV_STATE_CHECKED);add_net_row("Disco Home",-48,1,1);add_net_row("Guest network",-65,1,0);add_net_row("Studio",-75,1,0);curvelist_update(&g_wcl);}
+
+/* fork (Zune Quick Settings): the joined network's name ("" when not connected); runs wpa_cli, so callers cache it */
+int wifi_current_ssid(char *out, int cap){
+    char ssid[80], ip[40]; int c = wifi_status(ssid, sizeof ssid, ip, sizeof ip);
+    if(cap > 0) snprintf(out, (size_t)cap, "%s", c ? ssid : "");
+    return c;
+}

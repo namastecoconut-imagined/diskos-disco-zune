@@ -7,6 +7,7 @@
 #include "theme.h"
 #include "theme_kit.h"
 #include "screens.h"
+#include "zune_dial.h"
 #include "musicdb.h"
 #include "artcache.h"
 #include "theme.h"
@@ -75,9 +76,12 @@ __attribute__((unused)) static void progress_text(const book_t *b, char *out, si
     else      snprintf(out, len, "%ldm in", m > 0 ? m : 1);
 }
 
+static void book_open_index(int i);
 static void book_row_cb(lv_event_t *e){
     if(lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    book_open_index((int)(intptr_t)lv_event_get_user_data(e));
+}
+static void book_open_index(int i){
     if(i < 0 || i >= g_nbooks) return;
     /* re-read the bookmark, completion AND its age now (the list snapshot may be stale if the book
      * finished or advanced since the screen was built) so we resume at the LATEST saved position, and
@@ -149,6 +153,7 @@ static void books_rebuild(void){
     if(rc < 0){                                  /* DB read error (not "empty") -> a retryable failure, not "add files" */
         g_nbooks = 0;
         lv_obj_t *l = lv_label_create(g_list);
+        if(th_zune()){ lv_obj_delete(l); zune_empty(g_list, "couldn't read books", "reopen to try again."); return; }
         lv_label_set_text(l, "Couldn't read audiobooks\nReopen to try again");
         lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
         lv_obj_set_width(l, 260);
@@ -160,6 +165,7 @@ static void books_rebuild(void){
     g_nbooks = rc;
     if(g_nbooks <= 0){
         lv_obj_t *l = lv_label_create(g_list);
+        if(th_zune()){ lv_obj_delete(l); zune_empty(g_list, "no books yet", "add .m4b audiobooks to the card and rescan the library."); return; }
         lv_label_set_text(l, "No audiobooks\nAdd .m4b files to the card");
         lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
         lv_obj_set_width(l, 260);
@@ -203,19 +209,49 @@ static void books_rebuild(void){
         lv_obj_set_pos(lf, 70, 46);
         lv_obj_set_style_text_font(lf, TF(UI_12), 0);
         lv_obj_set_style_text_color(lf, b->completed ? TC(STATUS_SUCCESS) : (b->position_ms > 0 ? ui_current_accent() : TC(TEXT_DISABLED)), 0);
+        if(th_zune()){                                          /* Figma 29: the title in Regular 19 (accent while under way), one quiet line */
+            LV_FONT_DECLARE(font_zune_regular_19) LV_FONT_DECLARE(font_zune_regular_12)
+            lv_obj_set_style_bg_opa(r, LV_OPA_TRANSP, 0); lv_obj_set_style_bg_opa(r, LV_OPA_TRANSP, LV_STATE_PRESSED);
+            lv_obj_set_style_opa(r, LV_OPA_60, LV_STATE_PRESSED); kit_keep(r);
+            int going = !b->completed && b->position_ms > 0;
+            lv_obj_set_style_text_font(t, zune_font(&font_zune_regular_19), 0);
+            lv_obj_set_style_text_color(t, going ? TC(ACCENT_PRIMARY) : TC(TEXT_PRIMARY), 0); lv_obj_set_pos(t, 70, 12); kit_keep(t);
+            char line[96], au_l[64]; snprintf(au_l, sizeof au_l, "%s", b->author);
+            for(char *c = left; *c; c++) if(*c >= 'A' && *c <= 'Z') *c += 32;
+            for(char *c = au_l; *c; c++) if(*c >= 'A' && *c <= 'Z') *c += 32;
+            snprintf(line, sizeof line, "%s%s%s", au_l, au_l[0] && left[0] ? " \xC2\xB7 " : "", left);
+            lv_label_set_text(au, line); lv_obj_set_style_text_font(au, zune_font(&font_zune_regular_12), 0);
+            lv_obj_set_style_text_color(au, TC(TEXT_MUTED), 0); lv_obj_set_pos(au, 72, 38); kit_keep(au);
+            lv_obj_add_flag(lf, LV_OBJ_FLAG_HIDDEN);
+        }
     }
     lv_obj_update_layout(g_list); curvelist_update(&g_bcl);
     lv_obj_scroll_to_y(g_list, 0, LV_ANIM_OFF);
 }
 
+/* Zune: "continue listening" resumes the book listened to last (the first one under way) */
+static void zcontinue_cb(lv_event_t *e){
+    (void)e;
+    for(int i = 0; i < g_nbooks; i++) if(!g_books[i].completed && g_books[i].position_ms > 0){
+        book_open_index(i); return; }
+    ui_toast("No book under way");
+}
 void books_create(lv_obj_t *root){
     lv_obj_set_style_bg_color(root, TC(CANVAS), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
+    if(th_zune()){
+        LV_FONT_DECLARE(font_zune_regular_13)
+        zune_pivot(root, "books", NULL); zune_status(root, SCR_BOOKS);
+        lv_obj_t *cl = lv_label_create(root); kit_keep(cl); lv_label_set_text(cl, "continue listening");
+        lv_obj_set_style_text_font(cl, zune_font(&font_zune_regular_13), 0); lv_obj_set_style_text_color(cl, TC(ACCENT_PRIMARY), 0);
+        lv_obj_set_pos(cl, 60, 98); lv_obj_add_flag(cl, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_ext_click_area(cl, 12);
+        lv_obj_add_event_cb(cl, zcontinue_cb, LV_EVENT_CLICKED, NULL);
+    } else
     ui_header(root, "Books");
 
     g_list = lv_obj_create(root);
     lv_obj_remove_style_all(g_list);
-    lv_obj_set_pos(g_list, 46, 72); lv_obj_set_size(g_list, 268, 276);
+    lv_obj_set_pos(g_list, 46, th_zune() ? 122 : 72); lv_obj_set_size(g_list, 268, th_zune() ? 238 : 276);
     lv_obj_set_style_pad_bottom(g_list, 30, 0);   /* last row clears the round bottom bezel */
     lv_obj_set_style_bg_opa(g_list, LV_OPA_TRANSP, 0);
     lv_obj_set_flex_flow(g_list, LV_FLEX_FLOW_COLUMN);

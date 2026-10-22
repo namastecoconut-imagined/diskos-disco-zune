@@ -5,6 +5,8 @@
 #include "theme.h"
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
+#include "zune_dial.h"
 
 /* Text entry (Wi-Fi password, MA Sendspin server and name, playlist names): a full-screen modal with Search's
  * field and big keyboard. */
@@ -182,10 +184,142 @@ void kbinput_open(const char *title, const char *initial, kbinput_done_cb_t cb){
     { lv_obj_t *ta_lbl = lv_textarea_get_label(g_ta);   /* pin to the FONT's 24px line height so the text can't clip and centring can't drift */
       if(ta_lbl){ lv_obj_set_style_min_height(ta_lbl, 24, 0); lv_obj_set_style_max_height(ta_lbl, 24, 0); } }
 
+    if(th_zune()){ void zkb_build(lv_obj_t *modal, lv_obj_t *ta, const char *title, int password); zkb_build(g_modal, g_ta, title, g_keep_spaces); return; }
     /* Cancel / Save in the wide mid-band, above the keyboard */
     /* Cancel and Save between the field and the keys, where Search has its Search button */
     pill(g_modal, -50, 70, LV_SYMBOL_CLOSE, TC(TEXT_SECONDARY), cancel_btn);
     pill(g_modal,  50, 70, LV_SYMBOL_OK,    TC(STATUS_SUCCESS), save_btn);
 
     bkb_create(g_modal, g_ta, do_save);
+}
+
+/* ==== Zune (Figma 08): the letters round the rim - tap one, it lights in the accent; the field in the middle on a
+ * hairline, what it's for above it; Aa, 123, backspace and done as four discs; cancel (and show, for a password) ==== */
+LV_FONT_DECLARE(font_zune_light_28) LV_FONT_DECLARE(font_zune_regular_12) LV_FONT_DECLARE(font_zune_regular_13)
+LV_FONT_DECLARE(font_zune_regular_14) LV_FONT_DECLARE(font_zune_regular_17)
+#define ZK_MAX 32
+static const char *const ZK_SET[4] = {
+    "abcdefghijklmnopqrstuvwxyz-._",
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ-._",
+    "0123456789 !\"#$%&'()*+,/:;<=>?",
+    "@[\\]^`{|}~" };
+static struct { lv_obj_t *ta, *key[ZK_MAX], *lbl[ZK_MAX], *hit[ZK_MAX], *aa, *aa_l, *mode_l, *show_l; int page, n; } ZK;
+static void zk_paint(void){
+    const char *set = ZK_SET[ZK.page]; int n = (int)strlen(set); if(n > ZK_MAX) n = ZK_MAX; ZK.n = n;
+    for(int i = 0; i < ZK_MAX; i++){
+        if(i >= n){ lv_obj_add_flag(ZK.key[i], LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(ZK.hit[i], LV_OBJ_FLAG_HIDDEN); continue; }
+        float a = (-90.0f + 360.0f * i / n) * 0.0174533f;
+        int cx = 180 + (int)lroundf(146 * cosf(a)), cy = 180 + (int)lroundf(146 * sinf(a));
+        lv_obj_set_pos(ZK.key[i], cx - 14, cy - 14); lv_obj_set_pos(ZK.hit[i], cx - 8, cy - 8);
+        char t[2] = { set[i], 0 };
+        lv_label_set_text(ZK.lbl[i], set[i] == ' ' ? "sp" : t);              /* space: "sp", small */
+        lv_obj_set_style_text_font(ZK.lbl[i], zune_font(set[i] == ' ' ? &font_zune_regular_12 : &font_zune_regular_17), 0);
+        lv_obj_center(ZK.lbl[i]);
+        lv_obj_set_user_data(ZK.hit[i], (void *)(uintptr_t)(unsigned char)set[i]);
+        lv_obj_remove_flag(ZK.key[i], LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(ZK.hit[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_label_set_text(ZK.mode_l, ZK.page >= 2 ? "abc" : "123");
+    lv_label_set_text(ZK.aa_l, ZK.page >= 2 ? (ZK.page == 2 ? "#+=" : "123") : "Aa");
+    lv_obj_set_style_bg_color(ZK.aa, ZK.page == 1 ? TC(ACCENT_PRIMARY) : TC(SURFACE), 0);
+}
+static void zk_key_cb(lv_event_t *e){
+    lv_event_code_t c = lv_event_get_code(e);
+    lv_obj_t *h = lv_event_get_current_target(e);
+    int i = 0; while(i < ZK_MAX && ZK.hit[i] != h) i++;
+    if(i >= ZK_MAX) return;
+    if(c == LV_EVENT_PRESSED){ lv_obj_set_style_bg_opa(ZK.key[i], LV_OPA_COVER, 0); return; }
+    if(c == LV_EVENT_RELEASED || c == LV_EVENT_PRESS_LOST){ lv_obj_set_style_bg_opa(ZK.key[i], LV_OPA_TRANSP, 0); return; }
+    if(c != LV_EVENT_SHORT_CLICKED || !ZK.ta) return;
+    char t[2] = { (char)(uintptr_t)lv_obj_get_user_data(h), 0 };
+    lv_textarea_add_text(ZK.ta, t);
+    if(ZK.page == 1){ ZK.page = 0; zk_paint(); }                        /* one capital, then small letters again */
+}
+static void zk_aa_cb(lv_event_t *e){ if(lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    ZK.page = ZK.page == 0 ? 1 : ZK.page == 1 ? 0 : ZK.page == 2 ? 3 : 2; zk_paint(); }
+static void zk_mode_cb(lv_event_t *e){ if(lv_event_get_code(e) != LV_EVENT_CLICKED) return; ZK.page = ZK.page >= 2 ? 0 : 2; zk_paint(); }
+static void zk_bksp_cb(lv_event_t *e){
+    if(!ZK.ta) return;
+    if(lv_event_get_code(e) == LV_EVENT_LONG_PRESSED) lv_textarea_set_text(ZK.ta, "");   /* hold: clear all */
+    else if(lv_event_get_code(e) == LV_EVENT_SHORT_CLICKED) lv_textarea_delete_char(ZK.ta);
+}
+static void zk_show_cb(lv_event_t *e){
+    if(lv_event_get_code(e) != LV_EVENT_CLICKED || !ZK.ta) return;
+    int masked = lv_textarea_get_password_mode(ZK.ta);
+    lv_textarea_set_password_mode(ZK.ta, !masked);
+    if(ZK.show_l) lv_label_set_text(ZK.show_l, masked ? "hide" : "show");
+}
+static lv_obj_t *zk_disc(lv_obj_t *m, int cx, int cy, lv_color_t bg, lv_event_cb_t cb, const char *act, lv_obj_t **lbl, const char *txt){
+    lv_obj_t *d = lv_obj_create(m); lv_obj_remove_style_all(d); kit_keep(d);
+    lv_obj_set_size(d, 46, 46); lv_obj_set_pos(d, cx - 23, cy - 23);
+    lv_obj_set_style_radius(d, LV_RADIUS_CIRCLE, 0); lv_obj_set_style_bg_color(d, bg, 0); lv_obj_set_style_bg_opa(d, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(d, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    if(txt){ lv_obj_t *l = lv_label_create(d); kit_keep(l); lv_label_set_text(l, txt);
+             lv_obj_set_style_text_font(l, zune_font(&font_zune_regular_13), 0); lv_obj_set_style_text_color(l, TC(TEXT_PRIMARY), 0);
+             lv_obj_center(l); if(lbl) *lbl = l; }
+    lv_obj_t *h = lv_obj_create(m); lv_obj_remove_style_all(h); kit_keep(h);   /* the tap target (see Quick Settings) */
+    lv_obj_set_size(h, 20, 20); lv_obj_set_pos(h, cx - 10, cy - 10); lv_obj_set_ext_click_area(h, 14);
+    lv_obj_add_flag(h, LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(h, LV_OBJ_FLAG_SCROLLABLE);
+    ui_on(h, cb, cb == zk_bksp_cb ? LV_EVENT_SHORT_CLICKED : LV_EVENT_CLICKED, NULL, act, UI_CORE);
+    if(cb == zk_bksp_cb) lv_obj_add_event_cb(h, cb, LV_EVENT_LONG_PRESSED, NULL);
+    return d;
+}
+static lv_obj_t *zk_text(lv_obj_t *m, const char *t, lv_color_t c, int cx, int y, lv_event_cb_t cb, const char *act){
+    lv_obj_t *o = lv_obj_create(m); lv_obj_remove_style_all(o); kit_keep(o);
+    lv_obj_set_size(o, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_add_flag(o, LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE); lv_obj_set_ext_click_area(o, 10);
+    lv_obj_set_style_opa(o, LV_OPA_50, LV_STATE_PRESSED);
+    lv_obj_t *l = lv_label_create(o); kit_keep(l); lv_label_set_text(l, t);
+    lv_obj_set_style_text_font(l, zune_font(&font_zune_regular_14), 0); lv_obj_set_style_text_color(l, c, 0);
+    lv_obj_align(o, LV_ALIGN_TOP_MID, cx - 180, y);
+    ui_on(o, cb, LV_EVENT_CLICKED, NULL, act, UI_CORE);
+    return l;
+}
+void zkb_build(lv_obj_t *m, lv_obj_t *ta, const char *title, int password){
+    memset(&ZK, 0, sizeof ZK); ZK.ta = ta;
+    lv_textarea_set_placeholder_text(ta, "");
+    lv_obj_set_size(ta, 200, 44); lv_obj_align(ta, LV_ALIGN_TOP_MID, 0, 116);
+    lv_obj_set_style_bg_opa(ta, LV_OPA_TRANSP, 0); lv_obj_set_style_pad_all(ta, 0, 0);
+    lv_obj_set_style_text_font(ta, zune_font(&font_zune_light_28), 0);
+    lv_obj_set_style_text_align(ta, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_bg_color(ta, TC(ACCENT_PRIMARY), LV_PART_CURSOR);
+    { lv_obj_t *tl = lv_textarea_get_label(ta); if(tl){ lv_obj_set_style_min_height(tl, 0, 0); lv_obj_set_style_max_height(tl, LV_COORD_MAX, 0); } }
+    lv_obj_t *ln = lv_obj_create(m); lv_obj_remove_style_all(ln);                  /* the field's hairline */
+    lv_obj_set_size(ln, 180, 1); lv_obj_align(ln, LV_ALIGN_TOP_MID, 0, 166);
+    lv_obj_set_style_bg_color(ln, TC(TEXT_MUTED), 0); lv_obj_set_style_bg_opa(ln, LV_OPA_COVER, 0);
+    char low[160]; snprintf(low, sizeof low, "%s", title ? title : "");
+    for(char *c = low; *c; c++) if(*c >= 'A' && *c <= 'Z' && (c == low || c[-1] == ' ')) *c += 32;
+    lv_obj_t *t = lv_label_create(m); kit_keep(t); lv_label_set_text(t, low);
+    lv_label_set_long_mode(t, LV_LABEL_LONG_DOT); lv_obj_set_width(t, 200); lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(t, zune_font(&font_zune_regular_12), 0); lv_obj_set_style_text_color(t, TC(TEXT_MUTED), 0);
+    lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 96);
+    for(int i = 0; i < ZK_MAX; i++){
+        lv_obj_t *k = lv_obj_create(m); lv_obj_remove_style_all(k); kit_keep(k);
+        lv_obj_set_size(k, 28, 28); lv_obj_set_style_radius(k, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(k, TC(ACCENT_PRIMARY), 0); lv_obj_set_style_bg_opa(k, LV_OPA_TRANSP, 0);
+        lv_obj_remove_flag(k, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        ZK.key[i] = k;
+        ZK.lbl[i] = lv_label_create(k); kit_keep(ZK.lbl[i]); lv_obj_set_style_text_color(ZK.lbl[i], TC(TEXT_PRIMARY), 0);
+        lv_obj_t *h = lv_obj_create(m); lv_obj_remove_style_all(h); kit_keep(h);
+        lv_obj_set_size(h, 16, 16); lv_obj_set_ext_click_area(h, 8);
+        lv_obj_add_flag(h, LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(h, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(h, zk_key_cb, LV_EVENT_ALL, NULL);
+        ZK.hit[i] = h;
+    }
+    ZK.aa = zk_disc(m, 92, 212, TC(SURFACE), zk_aa_cb, "kb.zune.shift", &ZK.aa_l, "Aa");
+    zk_disc(m, 140, 212, TC(SURFACE), zk_mode_cb, "kb.zune.mode", &ZK.mode_l, "123");
+    lv_obj_t *bk = zk_disc(m, 198, 212, TC(SURFACE), zk_bksp_cb, "kb.zune.backspace", NULL, NULL);
+    static const lv_point_precise_t BX[6] = { { 9, 11 }, { 15, 5 }, { 27, 5 }, { 27, 17 }, { 15, 17 }, { 9, 11 } };   /* a drawn backspace */
+    lv_obj_t *bl = lv_line_create(bk); lv_line_set_points(bl, BX, 6); lv_obj_set_pos(bl, 5, 12);
+    lv_obj_set_style_line_width(bl, 2, 0); lv_obj_set_style_line_rounded(bl, true, 0); lv_obj_set_style_line_color(bl, TC(TEXT_PRIMARY), 0);
+    static const lv_point_precise_t BXX[2][2] = { { { 18, 8 }, { 24, 14 } }, { { 24, 8 }, { 18, 14 } } };
+    for(int k = 0; k < 2; k++){ lv_obj_t *x = lv_line_create(bk); lv_line_set_points(x, BXX[k], 2); lv_obj_set_pos(x, 5, 12);
+        lv_obj_set_style_line_width(x, 2, 0); lv_obj_set_style_line_rounded(x, true, 0); lv_obj_set_style_line_color(x, TC(TEXT_PRIMARY), 0); }
+    lv_obj_t *dn = zk_disc(m, 250, 212, TC(ACCENT_PRIMARY), save_btn, "kb.zune.done", NULL, NULL);
+    static const lv_point_precise_t CK[3] = { { 15, 23 }, { 20, 28 }, { 31, 17 } };
+    lv_obj_t *ck = lv_line_create(dn); lv_line_set_points(ck, CK, 3);
+    lv_obj_set_style_line_width(ck, 3, 0); lv_obj_set_style_line_rounded(ck, true, 0); lv_obj_set_style_line_color(ck, TC(ON_ACCENT), 0);
+    if(password){ zk_text(m, "cancel", TC(TEXT_MUTED), 150, 252, cancel_btn, "kb.zune.cancel");
+                  ZK.show_l = zk_text(m, "show", TC(ACCENT_PRIMARY), 214, 252, zk_show_cb, "kb.zune.show"); }
+    else zk_text(m, "cancel", TC(TEXT_MUTED), 180, 252, cancel_btn, "kb.zune.cancel");
+    zk_paint();
 }

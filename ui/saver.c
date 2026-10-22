@@ -5,6 +5,7 @@
 #include "screens.h"
 #include "braun.h"
 void dsaver_create(lv_obj_t *root); void dsaver_set_clock(const char *t); void dsaver_set_weather(const char *s); void dsaver_set_track(const char *title, const char *artist);
+void zsaver_create(lv_obj_t *root); void zsaver_set_clock(const char *t); void zsaver_set_track(const char *title, const char *artist);
 void bsaver_create(lv_obj_t *root); void bsaver_set_clock(const char *t); void bsaver_set_weather(const char *s); void bsaver_set_track(const char *title, const char *artist);
 #include "theme.h"
 #include "ipc.h"
@@ -153,7 +154,8 @@ static void vinyl_update_vis(void)
  * brightness rather than crushing to the clock-saver dim level (which reads as a
  * washed-out/blurry cover on the panel). It still powers fully off after the
  * screen-off delay, so there's no power regression. */
-int saver_wants_bright(void) { if(th_braun() || th_disco_family() || th_null()) return 0; return g_style == 4 && g_have_track && g_vbuf_valid; }
+int saver_wants_bright(void) { if(th_zune()) return 1;   /* Zune lock screen stays readable until Screen Off */
+    if(th_braun() || th_disco_family() || th_null()) return 0; return g_style == 4 && g_have_track && g_vbuf_valid; }
 
 /* Sharp vinyl cover, decoded OFF the UI thread.
  *
@@ -364,7 +366,7 @@ static void vspin_cb(void *var, int32_t v){
 }
 void saver_vinyl_spin(int want)
 {
-    if(th_braun() || th_disco_family() || th_null()) return;
+    if(th_braun() || th_disco_family() || th_null() || th_zune()) return;
     want = want && g_style == 4 && g_vinyl &&
            !lv_obj_has_flag(g_vinyl, LV_OBJ_FLAG_HIDDEN);   /* never spin a hidden/no-cover image */
     if (want == g_vspin) return;
@@ -467,6 +469,7 @@ void saver_create(lv_obj_t *root)
     if(th_null()){null_saver_create(root);return;}
     if(th_disco_family()){ dsaver_create(root); return; }            /* Disco: the Music screen at rest */
     if(th_braun()){ bsaver_create(root); return; }            /* Braun: its own standby, whatever the saver style */
+    if(th_zune()){ zsaver_create(root); return; }             /* Zune: Figma 02, whatever the saver style */
     lv_obj_set_style_bg_color(root, TC(SCRIM), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
 
@@ -563,7 +566,7 @@ void saver_create(lv_obj_t *root)
  * pointers are always valid. */
 void saver_set_accent(lv_color_t c)
 {
-    if(th_braun() || th_disco_family() || th_null()) return;
+    if(th_braun() || th_disco_family() || th_null() || th_zune()) return;
     if (g_rring) lv_obj_set_style_arc_color(g_rring, theme_color_mix(ui_media_accent(), TC(SCRIM), 120), LV_PART_INDICATOR);
     if (g_track && g_style == 5) lv_obj_set_style_text_color(g_track, theme_color_mix(ui_media_accent(), TC(SCRIM), 150), 0);
     if (g_sec)    lv_obj_set_style_line_color(g_sec, c, 0);
@@ -574,7 +577,7 @@ void saver_set_accent(lv_color_t c)
  * than waiting for the next clock tick (which is where style changes were applied). */
 void saver_show_sync(void)
 {
-    if(th_braun() || th_disco_family() || th_null()) return;
+    if(th_braun() || th_disco_family() || th_null() || th_zune()) return;
     int s = simple_cfg_get_int("saver_style", 0);
     if (s != g_style) { relayout(s); g_style = s; }
     saver_set_accent(ui_current_accent());
@@ -643,6 +646,7 @@ void saver_set_clock(const char *t, const char *date)
     if(th_null()){null_saver_clock(t,date);return;}
     if(th_disco_family()){ dsaver_set_clock(t); return; }
     if(th_braun()){ bsaver_set_clock(t); return; }
+    if(th_zune()){ zsaver_set_clock(t); return; }
     /* re-apply layout if the style setting changed */
     int s = simple_cfg_get_int("saver_style", 0);
     if (s != g_style) { relayout(s); g_style = s; }
@@ -676,6 +680,7 @@ void saver_set_weather(const char *text)
     if(th_null()){null_saver_weather(text);return;}
     if(th_disco_family()){ dsaver_set_weather(text); return; }
     if(th_braun()){ bsaver_set_weather(text); return; }
+    if(th_zune()) return;
     snprintf(g_wx_full, sizeof g_wx_full, "%s", text ? text : "");
     weather_apply();
 }
@@ -685,6 +690,7 @@ void saver_set_track(const char *title, const char *artist, const void *backdrop
     if(th_null()){null_saver_track(title,artist);return;}
     if(th_disco_family()){ dsaver_set_track(title, artist); return; }
     if(th_braun()){ bsaver_set_track(title, artist); return; }
+    if(th_zune()){ zsaver_set_track(title, artist); return; }
     /* The caller passes a non-NULL title iff st.have_track (NULL when no track), so key off
      * NULL-ness, not emptiness - a valid but untitled file still counts as a loaded track. */
     g_have_track = (title != NULL);

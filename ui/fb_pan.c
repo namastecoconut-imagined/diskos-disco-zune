@@ -126,3 +126,19 @@ lv_display_t *fbpan_create(const char *dev){
     lv_display_set_buffers(disp, b1, b2, bufsz, LV_DISPLAY_RENDER_MODE_PARTIAL);
     return disp;
 }
+
+/* Zune power-key preview: the player's screen-off may blank or re-pan the panel as well as zeroing the backlight, which
+ * left a lit but empty (grey) glass. Unblank, pan back to our page and redraw everything. Returns the pan offset the
+ * panel was on (for the trace), or -1. */
+int fbpan_wake(void){
+    lv_display_t *d = lv_display_get_default(); if(!d) return -1;
+    fbpan_t *f = lv_display_get_driver_data(d); if(!f) return -1;
+    struct fb_var_screeninfo v; int was = -1;
+    if(ioctl(f->fd, FBIOGET_VSCREENINFO, &v) == 0) was = (int)v.yoffset;
+    ioctl(f->fd, FBIOBLANK, FB_BLANK_UNBLANK);
+    v = f->vinfo; v.xoffset = 0; v.yoffset = (uint32_t)(f->visible_off / f->finfo.line_length); v.activate = FB_ACTIVATE_NOW;
+    ioctl(f->fd, FBIOPAN_DISPLAY, &v);
+    lv_obj_invalidate(lv_screen_active());
+    lv_refr_now(d);
+    return was;
+}

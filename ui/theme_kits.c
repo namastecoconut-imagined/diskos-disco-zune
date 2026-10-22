@@ -308,4 +308,15 @@ static void ring_style(lv_obj_t *o,kit_role_t role){
  }
 }
 const theme_kit_t theme_kit_ring={ .id="ring", .style=ring_style };
+void zhome_create(lv_obj_t *root);
+void kit_fork_np_zune(void);
+/* Zune: no button rings at all - its type and the accent carry everything. Ring's pass used to put a 2 px accent ring
+ * on any 28-120 px tap target it met (stock pages, links, hit areas), the stray "outline" on some taps. */
+static void zune_style(lv_obj_t *o,kit_role_t role){
+ if(role==KIT_TITLE){lv_obj_set_style_border_width(o,0,0);lv_obj_set_style_outline_width(o,0,0);}
+ if(!lv_obj_has_flag(o,LV_OBJ_FLAG_CLICKABLE))return;
+ lv_obj_set_style_shadow_width(o,0,0);
+ lv_obj_set_style_outline_width(o,0,LV_STATE_ANY);
+}
+const theme_kit_t theme_kit_zune={ .id="zune", .style=zune_style, .home_build=zhome_create, .fork_np_layout=kit_fork_np_zune };
 const theme_kit_t theme_kit_braun={ .id="braun", .home_build=bhome_create, .fork_np_layout=kit_fork_np_braun };

@@ -221,10 +221,32 @@ static void disco_build(void){
         lv_obj_set_style_bg_opa(r,LV_OPA_COVER,LV_STATE_PRESSED);
     }
 }
+/* Zune: a pivot ("apps" / "all apps") over the dial list, lower case, every item in one scroll (no pages) */
+#include "zune_dial.h"
+static void zapps_pick_async(void *u){ apps_pick((int)(intptr_t)u); }
+static void zapps_pick(int i){ lv_async_call(zapps_pick_async, (void *)(intptr_t)i); }   /* "all apps" rebuilds the dial: not from its own click */
+static void zapps_back_async(void *u){ (void)u; if(g_all){ g_all = 0; g_page = 0; apps_reload(); } else screen_back(); }
+static void zapps_back(lv_event_t *e){ (void)e; lv_async_call(zapps_back_async, NULL); }
+static void zune_build(void){
+    g_page = 0;
+    static char lab[ZDIAL_MAX][64]; const char *lb[ZDIAL_MAX];
+    int n = g_nitems > ZDIAL_MAX ? ZDIAL_MAX : g_nitems;
+    for(int i = 0; i < n; i++){
+        snprintf(lab[i], sizeof lab[i], "%s", g_items[i].name);
+        for(char *c = lab[i]; *c; c++) if(*c >= 'A' && *c <= 'Z') *c += 32;
+        lb[i] = lab[i];
+    }
+    zune_pivot(g_box, g_all ? "all apps" : "apps", zapps_back);
+    zune_status(g_box, SCR_APPS);
+    if(n < 1){ zune_empty(g_box, "no shortcuts", "choose them in settings > display > shortcuts");
+               lv_obj_align(lv_obj_get_child(g_box, -1), LV_ALIGN_TOP_MID, 0, 110); return; }
+    zdial_build(g_box, lb, n, 0, zapps_pick, 100, "apps.zune");
+}
 static void build_page(void){
     if(!g_box) return;
     lv_obj_clean(g_box);
     memset(&g_orb, 0, sizeof g_orb);
+    if(th_zune()){ zune_build(); return; }
     if((th_disco_family() || th_null())){ disco_build(); return; }
     int per = g_all ? PER_PAGE : NSC;
     int pages = g_all ? (g_nitems + PER_PAGE - 1) / PER_PAGE : 1; if(pages < 1) pages = 1;

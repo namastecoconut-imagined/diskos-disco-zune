@@ -18,4 +18,8 @@ int  modes_local_init(int with_gadget); /* route-aware local init: 0642/0666/065
 /* main.c: NULL when an output switch may run now, else a short reason for the toast */
 const char *ui_output_blocked(void);
 
+void modes_output_open(void);   /* Zune: the output dial (Figma 81) */
+void modes_usb_poll(void);
+void modes_boot_check(void);   /* status poll: a USB-C route left over from before a restart goes back to the jack */      /* status poll: USB-C DAC plugged / unplugged (Figma 82) */
+
 #endif

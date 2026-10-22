@@ -145,6 +145,17 @@ static void letter_cb(lv_event_t *e){
 static void grid_bg_cb(lv_event_t *e){                       /* a tap outside the letters closes the grid */
     if(lv_event_get_code(e) == LV_EVENT_CLICKED) lv_obj_add_flag(lv_event_get_current_target(e), LV_OBJ_FLAG_HIDDEN);
 }
+static void zgrid_cb(lv_event_t *e){                        /* Zune: which tile was tapped (or none: close) */
+    lv_obj_t *g = lv_event_get_current_target(e); azjump_t *a = lv_obj_get_user_data(g);
+    lv_point_t p; lv_indev_get_point(lv_indev_active(), &p);
+    for(uint32_t k = 0; k < lv_obj_get_child_count(g); k++){
+        lv_obj_t *c = lv_obj_get_child(g, (int32_t)k); if(!lv_obj_get_user_data(c)) continue;
+        lv_area_t ar; lv_obj_get_coords(c, &ar);
+        if(p.x >= ar.x1 - 2 && p.x <= ar.x2 + 2 && p.y >= ar.y1 - 2 && p.y <= ar.y2 + 2){
+            lv_obj_add_flag(g, LV_OBJ_FLAG_HIDDEN); if(a && a->jump) a->jump((char)(intptr_t)lv_obj_get_user_data(c)); return; }
+    }
+    lv_obj_add_flag(g, LV_OBJ_FLAG_HIDDEN);
+}
 static void btn_cb(lv_event_t *e){
     if(lv_event_get_code(e) != LV_EVENT_SHORT_CLICKED) return;
     azjump_t *a = lv_event_get_user_data(e);
@@ -209,12 +220,38 @@ void azjump_create(azjump_t *a, lv_obj_t *root, azjump_cb_t jump, const char *ta
         char b[2] = { AZ[i], 0 }; lv_label_set_text(l, b);
         lv_obj_set_style_text_font(l, th_simple()?TF(UI_24):TF(UI_20), 0);
         lv_obj_set_style_text_color(l, TC(TEXT_PRIMARY), 0); lv_obj_center(l);
+        if(th_zune()){                                            /* Figma 31: square tiles in rows that fit the glass */
+            static const char *ORD = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ"; static const int ROWN[5] = { 3, 6, 7, 7, 4 };
+            int k = (int)(strchr(ORD, AZ[i]) - ORD), row = 0, base = 0;
+            while(row < 4 && k >= base + ROWN[row]){ base += ROWN[row]; row++; }
+            int col = k - base, x = 180 - ROWN[row] * 40 / 2 + col * 40 + 2, y = 82 + row * 40;
+            lv_obj_set_pos(cell, x, y); lv_obj_set_size(cell, 36, 36);
+            lv_obj_set_style_radius(cell, 0, 0);
+            lv_obj_set_style_bg_color(cell, TC(ACCENT_PRIMARY), 0); lv_obj_set_style_bg_opa(cell, LV_OPA_COVER, 0);
+            lv_obj_set_style_bg_color(cell, TC(TEXT_PRIMARY), LV_STATE_PRESSED);
+            LV_FONT_DECLARE(font_zune_regular_19)
+            char lo[2] = { (char)(AZ[i] >= 'A' && AZ[i] <= 'Z' ? AZ[i] + 32 : AZ[i]), 0 }; lv_label_set_text(l, lo);
+            lv_obj_set_style_text_font(l, &font_zune_regular_19, 0); lv_obj_set_style_text_color(l, TC(ON_ACCENT), 0);
+            kit_keep(cell); kit_keep(l);
+            lv_obj_remove_flag(cell, LV_OBJ_FLAG_CLICKABLE);      /* the kit would round a clickable tile: the grid takes the tap */
+            lv_obj_set_user_data(cell, (void *)(intptr_t)AZ[i]);
+        }
     }
+    if(th_zune()){ lv_obj_set_style_bg_opa(a->grid, LV_OPA_COVER, 0); lv_obj_add_flag(gt, LV_OBJ_FLAG_HIDDEN); kit_keep(a->grid);
+                   lv_obj_remove_event_cb(a->grid, grid_bg_cb); lv_obj_add_event_cb(a->grid, zgrid_cb, LV_EVENT_CLICKED, NULL); }
 }
 void azjump_show(azjump_t *a, int on){
     if(!a->btn) return;
     if(on){
         lv_obj_clear_flag(a->btn,LV_OBJ_FLAG_HIDDEN);
+        if(th_zune() && !wheel_mode(a)){                    /* Zune (Figma 29:67): a 34 px magenta dot on the right rim, the current letter in it */
+            lv_obj_t*l=lv_obj_get_child(a->btn,0); kit_keep(a->btn); kit_keep(l);
+            lv_obj_set_pos(a->btn,305,179);lv_obj_set_size(a->btn,34,34);lv_obj_set_style_radius(a->btn,LV_RADIUS_CIRCLE,0);
+            lv_obj_set_style_bg_color(a->btn,TC(ACCENT_PRIMARY),0);lv_obj_set_style_bg_opa(a->btn,LV_OPA_COVER,0);
+            lv_obj_set_style_text_font(l,TF(UI_16),0);lv_obj_set_style_text_color(l,TC(ON_ACCENT),0);
+            if(!strcmp(lv_label_get_text(l),"A-Z")||!strcmp(lv_label_get_text(l),"A - Z"))lv_label_set_text(l,"a");
+            lv_obj_set_style_pad_bottom(l,3,0);lv_obj_center(l);
+        } else
         if(!wheel_mode(a)){
             lv_obj_t*l=lv_obj_get_child(a->btn,0);
             int pill=th_disco_family()||th_null();lv_obj_set_pos(a->btn,pill?138:308,pill?316:158);lv_obj_set_size(a->btn,pill?84:44,pill?36:44);
@@ -224,3 +261,12 @@ void azjump_show(azjump_t *a, int on){
     }
     else { wheel_close(a,0);lv_obj_add_flag(a->btn, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(a->grid, LV_OBJ_FLAG_HIDDEN); }
 }
+
+/* Zune: the dot shows where the list is (its first visible row's letter, lower case) */
+void azjump_letter(azjump_t *a, char letter){
+    if(!th_zune() || !a || !a->btn || wheel_mode(a) || lv_obj_has_flag(a->btn, LV_OBJ_FLAG_HIDDEN)) return;
+    char t[2] = { (char)((letter >= 'A' && letter <= 'Z') ? letter + 32 : letter ? letter : '#'), 0 };
+    lv_obj_t *l = lv_obj_get_child(a->btn, 0);
+    if(l && strcmp(lv_label_get_text(l), t)){ lv_label_set_text(l, t); lv_obj_center(l); }
+}
+void azjump_test_grid(void){ if(library_picker && library_picker->grid){ lv_obj_clear_flag(library_picker->grid, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(library_picker->grid); } }   /* host renders */

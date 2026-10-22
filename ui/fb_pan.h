@@ -9,4 +9,5 @@ lv_display_t *fbpan_create(const char *dev);
  * with fbpan_bind_touch (the evdev pointer; call it right after lv_evdev_create). */
 void fbpan_set_rotation(int v);
 void fbpan_bind_touch(lv_indev_t *indev);
+int fbpan_wake(void);   /* unblank + re-pan + full redraw (Zune power-key preview) */
 #endif

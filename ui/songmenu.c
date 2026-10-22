@@ -17,7 +17,9 @@
 #include <stdio.h>
 #include <string.h>
 
-enum { A_QUEUE, A_PLAYLIST, A_FAV, A_ALBUM, A_ARTIST, A_INFO, A_TAGS, A_RENAME, A_COPYMOVE, A_DELETE, A_PLAY, A_SHUFFLE, A_MOOD, A_N };
+enum { A_QUEUE, A_PLAYLIST, A_FAV, A_ALBUM, A_ARTIST, A_INFO, A_TAGS, A_RENAME, A_COPYMOVE, A_DELETE, A_PLAY, A_SHUFFLE, A_MOOD, A_SELECT, A_N };
+static void (*g_sel_next)(void), (*g_sel)(void);   /* Zune: "Select" starts picking from this item (the Library sets it per hold) */
+void songmenu_offer_select(void (*fn)(void)){ g_sel_next = fn; }
 static lv_obj_t *g_ov;
 static orbit_t g_orb;
 static int g_act[8], g_nact, g_is_dir, g_fav;
@@ -74,12 +76,48 @@ static void pick(int i){
         case A_DELETE:   fileops_action(g_dir, g_name, g_is_dir, g_done, 2); break;
         case A_PLAY:     if(g_gplay) g_gplay(0); break;
         case A_SHUFFLE:  if(g_gplay) g_gplay(1); break;
+        case A_SELECT:   if(g_sel) g_sel(); break;
         case A_MOOD:     sphere_ui_tag(!strcmp(g_gcol, "ALBUM") ? 1 : 2, g_gval, g_gval); break;   /* SongSphere: where it sits */
     }
 }
 static void hub_cb(lv_event_t *e){ (void)e; close_ov(); }
+/* Zune (Figma 32): the item small at the top (its cover beside it), the actions as a dial; tap off the dial = close */
+#include "zune_dial.h"
+#include "theme_kit.h"
+LV_FONT_DECLARE(font_zune_regular_12)
+static void zpick_async(void *u){ pick((int)(intptr_t)u); }
+static void zpick(int i){ lv_async_call(zpick_async, (void *)(intptr_t)i); }   /* the dial goes with the overlay: not from its own click */
+static void zune_menu(const char *title, const int *acts, int n){
+    g_ov = lv_obj_create(lv_layer_top()); lv_obj_remove_style_all(g_ov); kit_keep(g_ov);
+    lv_obj_set_size(g_ov, 360, 360);
+    lv_obj_set_style_bg_color(g_ov, TC(CANVAS), 0); lv_obj_set_style_bg_opa(g_ov, LV_OPA_COVER, 0);
+    lv_obj_add_flag(g_ov, LV_OBJ_FLAG_CLICKABLE); lv_obj_clear_flag(g_ov, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(g_ov, hub_cb, LV_EVENT_CLICKED, NULL);
+    static const char *const ZCAP[A_N] = { "add to queue", "add to playlist", "favourite", "go to album", "go to artist", "info", "edit tags",
+                                           "rename", "copy / move", "delete", "play", "shuffle", "mood", "select" };
+    static char lab[10][24]; const char *lb[10];
+    g_nact = n > 9 ? 9 : n;
+    for(int i = 0; i < g_nact; i++) g_act[i] = acts[i];
+    g_sel = g_sel_next; g_sel_next = NULL;
+    if(g_sel && g_nact < 9) g_act[g_nact++] = A_SELECT;
+    int focus = 0;
+    for(int i = 0; i < g_nact; i++){
+        snprintf(lab[i], sizeof lab[i], "%s", g_act[i] == A_FAV && g_fav ? "unfavourite" : ZCAP[g_act[i]]); lb[i] = lab[i];
+        if(g_act[i] == A_QUEUE && !focus) focus = i;
+    }
+    zdial_build(g_ov, lb, g_nact, focus, zpick, 56, "songmenu.zune");
+    for(int i = 0; i < g_nact; i++) if(g_act[i] == A_DELETE) zdial_set_color(i, TC(ACCENT_PRIMARY));
+    lv_obj_t *t = lv_label_create(g_ov); kit_keep(t);
+    char b[300]; snprintf(b, sizeof b, "%s%s%s", title, g_have_song && g_song.artist[0] ? " \xC2\xB7 " : "", g_have_song ? g_song.artist : "");
+    lv_label_set_text(t, b); lv_label_set_long_mode(t, LV_LABEL_LONG_SCROLL_CIRCULAR); lv_obj_set_width(t, 200);
+    lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(t, zune_font(&font_zune_regular_12), 0); lv_obj_set_style_text_color(t, TC(TEXT_MUTED), 0);
+    lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 26);
+    if(screen_current()==SCR_LIBRARY)onboarding_discovered(HINT_LIBRARY);
+}
 static void open_menu(const char *title, const int *acts, int n){
     close_ov();
+    if(th_zune()){ zune_menu(title, acts, n); return; }
     g_ov = lv_obj_create(lv_layer_top());
     lv_obj_remove_style_all(g_ov);
     lv_obj_set_size(g_ov, 360, 360);
@@ -88,11 +126,13 @@ static void open_menu(const char *title, const int *acts, int n){
     lv_obj_add_flag(g_ov, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_clear_flag(g_ov, LV_OBJ_FLAG_SCROLLABLE);
     static const char *const GLYPH[A_N] = { LV_SYMBOL_LIST, LV_SYMBOL_PLUS, TH_IC_HEART, LV_SYMBOL_IMAGE, LV_SYMBOL_HOME, LV_SYMBOL_FILE,
-                                           LV_SYMBOL_DOWNLOAD, LV_SYMBOL_EDIT, LV_SYMBOL_COPY, LV_SYMBOL_TRASH, LV_SYMBOL_PLAY, LV_SYMBOL_SHUFFLE, LV_SYMBOL_GPS };
-    static const char *const CAP[A_N] = { "Queue", "Playlist", "Favourite", "Album", "Artist", "Info", "Tags", "Rename", "Copy/Move", "Delete", "Play", "Shuffle", "Mood" };
+                                           LV_SYMBOL_DOWNLOAD, LV_SYMBOL_EDIT, LV_SYMBOL_COPY, LV_SYMBOL_TRASH, LV_SYMBOL_PLAY, LV_SYMBOL_SHUFFLE, LV_SYMBOL_GPS, LV_SYMBOL_OK };
+    static const char *const CAP[A_N] = { "Queue", "Playlist", "Favourite", "Album", "Artist", "Info", "Tags", "Rename", "Copy/Move", "Delete", "Play", "Shuffle", "Mood", "Select" };
     orbit_item_t it[8];
     g_nact = n > 8 ? 8 : n;
     for(int i = 0; i < g_nact; i++){ g_act[i] = acts[i]; it[i].glyph = GLYPH[acts[i]]; it[i].cap = CAP[acts[i]]; }
+    g_sel = g_sel_next; g_sel_next = NULL;                                   /* offered for this menu only */
+    if(g_sel && th_zune() && g_nact < 8){ g_act[g_nact] = A_SELECT; it[g_nact].glyph = GLYPH[A_SELECT]; it[g_nact].cap = CAP[A_SELECT]; g_nact++; }
     orbit_create(&g_orb, g_ov, it, g_nact, -90, pick);
     for(int i = 0; i < g_nact; i++){
         if(g_act[i] == A_FAV){ lv_obj_set_style_text_font(g_orb.icon[i], &font_theme_20, 0); orbit_set_on(&g_orb, i, g_fav, ui_current_accent()); }

@@ -28,6 +28,7 @@ typedef struct mp_host {
 void mp_attach(mp_host_t *h);                /* once, after root/list/title exist: builds the hidden action bar */
 void mp_row(mp_host_t *h, lv_obj_t *row, int index);   /* a row was built: picking gestures, and its tick if picking */
 int  mp_active(const mp_host_t *h);
+void mp_start(mp_host_t *h, int index);    /* start picking with this item ticked (Zune: from the hold menu) */
 void mp_exit(mp_host_t *h);                  /* stop picking (Back, a reload of the list) */
 void mp_demo(mp_host_t *h, const char *csv); /* renderer: tick these indices; "more" opens the More list */
 #endif

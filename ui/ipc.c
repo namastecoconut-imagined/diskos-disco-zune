@@ -425,9 +425,25 @@ void ipc_clear_external(void){
     pthread_mutex_lock(&g_mu); if(g_ext.on){ g_ext.on = 0; g_ext.bump++; } pthread_mutex_unlock(&g_mu);
 }
 int ipc_external_active(void){ return g_ext.on; }
+/* "Clear everything" from the queue: the player has no unload command, so the paused track is hidden from every
+ * screen until it moves (played again, seeked) or another one loads. */
+static struct { int on; char path[256]; long pos; } g_dis;
+void ipc_dismiss_track(void){
+    pthread_mutex_lock(&g_mu);
+    g_dis.on = g_state.have_track; snprintf(g_dis.path, sizeof g_dis.path, "%s", g_state.path); g_dis.pos = g_state.position_ms;
+    g_ext.bump++;
+    pthread_mutex_unlock(&g_mu);
+}
 void ipc_get_state(track_state_t*out){
     pthread_mutex_lock(&g_mu); *out=g_state;
     out->seq += g_ext.bump;
+    if(g_dis.on && !g_ext.on){
+        long d = g_state.position_ms - g_dis.pos;
+        if(g_state.have_track && !strcmp(g_state.path, g_dis.path) && d > -1500 && d < 1500){
+            out->have_track = 0; out->title[0] = out->artist[0] = out->album[0] = out->path[0] = 0;
+            out->duration_ms = out->position_ms = 0; out->pos_id = 0; out->sample_rate = 0; out->is_dsd = 0;
+        } else { g_dis.on = 0; out->seq += 1; g_ext.bump++; }
+    }
     if(g_ext.on){
         snprintf(out->title, sizeof out->title, "%s", g_ext.title); snprintf(out->artist, sizeof out->artist, "%s", g_ext.artist);
         snprintf(out->album, sizeof out->album, "%s", g_ext.album); snprintf(out->path, sizeof out->path, "%s", g_ext.path);

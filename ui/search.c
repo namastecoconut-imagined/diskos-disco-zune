@@ -17,6 +17,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 #define MAX_RESULTS 80
 #define KEY_H 46
@@ -50,13 +51,29 @@ lv_obj_t *search_scroller(void){
     return (g_res_page && !lv_obj_has_flag(g_res_page, LV_OBJ_FLAG_HIDDEN)) ? g_res_list : NULL;
 }
 
+#include "zune_dial.h"
+LV_FONT_DECLARE(font_zune_regular_19) LV_FONT_DECLARE(font_zune_regular_12) LV_FONT_DECLARE(font_zune_semibold_11)
+static lv_obj_t *g_zq;                                         /* Zune: the query as the pivot title */
+static void zcap(const char *t){
+    lv_obj_t *l = lv_label_create(g_res_list); kit_keep(l); lv_label_set_text(l, t);
+    lv_obj_set_style_text_font(l, &font_zune_semibold_11, 0); lv_obj_set_style_text_letter_space(l, 2, 0);
+    lv_obj_set_style_text_color(l, TC(TEXT_MUTED), 0); lv_obj_set_width(l, RES_W); lv_obj_set_style_pad_left(l, 14, 0);
+    lv_obj_set_style_margin_top(l, 6, 0);
+}
+static void zrow(lv_obj_t *r, lv_obj_t *t, lv_obj_t *sub){
+    lv_obj_set_style_bg_opa(r, LV_OPA_TRANSP, 0); lv_obj_set_style_bg_opa(r, LV_OPA_TRANSP, LV_STATE_PRESSED);
+    lv_obj_set_style_opa(r, LV_OPA_60, LV_STATE_PRESSED); kit_keep(r);
+    lv_obj_set_style_text_font(t, zune_font(&font_zune_regular_19), 0); lv_obj_set_style_text_color(t, TC(TEXT_PRIMARY), 0); kit_keep(t);
+    if(sub){ lv_obj_set_style_text_font(sub, zune_font(&font_zune_regular_12), 0); lv_obj_set_style_text_color(sub, TC(TEXT_MUTED), 0); kit_keep(sub); }
+}
 /* ---- results page --------------------------------------------------------------------------------- */
 static void results_close(void){
-    if(!g_res_page) return;
+    if(!g_res_page || th_zune()) return;
     lv_obj_add_flag(g_res_page, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clean(g_res_list);
 }
 int search_back_consumed(void){                    /* screen_back(): the results page closes first */
+    if(th_zune()) return 0;
     if(!g_res_page || lv_obj_has_flag(g_res_page, LV_OBJ_FLAG_HIDDEN)) return 0;
     results_close();
     return 1;
@@ -113,6 +130,7 @@ static void res_row(const mdb_song_t *s){
     lv_obj_set_pos(a, 12, 31); lv_obj_set_size(a, 244, 20);
     lv_obj_set_style_text_font(a, ui_font_user(16), 0);
     lv_obj_set_style_text_color(a, TC(TEXT_LYRICS), 0);
+    if(th_zune()){ zrow(r, t, a); lv_obj_set_pos(t, 12, 4); lv_obj_set_pos(a, 14, 30); lv_obj_set_height(r, 50); }
 }
 /* an artist hit: one line with the microphone; a tap opens the artist's albums */
 static char g_res_art[5][MDB_STR];
@@ -138,6 +156,7 @@ static void res_artist(int i){
     lv_obj_set_style_text_color(t, TC(TEXT_PRIMARY), 0); lv_obj_align(t, LV_ALIGN_LEFT_MID, 42, 0);
     lv_obj_t *c = lv_label_create(r); lv_label_set_text(c, "Artist"); lv_obj_set_style_text_font(c, TF(UI_12), 0);
     lv_obj_set_style_text_color(c, TC(TEXT_SECONDARY), 0); lv_obj_align(c, LV_ALIGN_RIGHT_MID, -14, 0);
+    if(th_zune()){ zrow(r, t, NULL); lv_obj_add_flag(c, LV_OBJ_FLAG_HIDDEN); lv_obj_set_style_text_color(ic, TC(TEXT_MUTED), 0); }
 }
 static void res_rule(void){                                       /* the line between artists and songs */
     lv_obj_t *l = lv_obj_create(g_res_list); lv_obj_remove_style_all(l);
@@ -156,9 +175,13 @@ static void results_open(void){
     else snprintf(cnt, sizeof cnt, "%s%d for \xE2\x80\x9C%s\xE2\x80\x9D", n > MAX_RESULTS ? "First " : "", shown, g_query);
     lv_label_set_text(g_res_count, cnt);
     int na = mdb_search_artists(g_query, g_res_art, 5);            /* artists first, then the songs */
+    if(th_zune() && na) zcap("ARTISTS");
     for(int i = 0; i < na; i++) res_artist(i);
-    if(na && shown) res_rule();
-    if(n <= 0 && !na) res_note("No results\nGo back to change the search");
+    if(th_zune() && shown) zcap("SONGS");
+    else if(na && shown) res_rule();
+    if(th_zune() && g_zq){ lv_label_set_text(g_zq, g_query[0] ? g_query : "search"); }
+    if(n <= 0 && !na && th_zune()) zune_empty(g_res_list, "nothing found", "tap the word at the top to search again.");
+    else if(n <= 0 && !na) res_note("No results\nGo back to change the search");
     for(int i = 0; i < shown; i++) res_row(buf[i]);
     if(n > MAX_RESULTS) res_note("Type more to narrow it down");
     lv_obj_update_layout(g_res_list); curvelist_update(&g_rcl);
@@ -303,6 +326,51 @@ static void key_style(lv_obj_t *k, int radius){
     lv_obj_set_style_bg_color(k, TC(SURFACE_RAISED), LV_STATE_PRESSED);
 }
 
+/* Zune (Figma 33): the query is the pivot header; a tap on it opens the round keyboard; results grouped under small
+ * capitals. Entering Search with nothing typed opens the keyboard straight away. */
+static void zq_back_async(void *u){ (void)u; if(screen_current() == SCR_SEARCH) screen_back(); }
+static void zq_done(const char *text){
+    /* cancelled (or nothing typed) with no search showing: leave Search, don't strand an empty page */
+    if(!text){ if(!g_query[0]) lv_async_call(zq_back_async, NULL); return; }   /* cancel: keep a search that's showing */
+    if(!text[0]){ g_query[0] = 0; if(g_zq) lv_label_set_text(g_zq, "search"); lv_async_call(zq_back_async, NULL); return; }
+    snprintf(g_query, sizeof g_query, "%s", text);
+    for(char *c = g_query; *c; c++) if(*c >= 'A' && *c <= 'Z') *c += 32;
+    if(g_query[0]){ recent_add(g_query); results_open(); }
+    else if(g_zq) lv_label_set_text(g_zq, "search");
+}
+static void zq_edit(lv_event_t *e){ (void)e; kbinput_open("search", g_query, zq_done); }
+static void zq_edit_async(void *u){ (void)u; if(screen_current() == SCR_SEARCH) kbinput_open("search", g_query, zq_done); }
+static void zq_back(lv_event_t *e){ (void)e; screen_back(); }
+static void zsearch_build(lv_obj_t *root){
+    (void)root;
+    lv_obj_clean(g_res_page);                                     /* the stock header goes; the page stays as the results */
+    g_res_list = lv_obj_create(g_res_page); lv_obj_remove_style_all(g_res_list);
+    lv_obj_set_pos(g_res_list, (360 - RES_W) / 2, 104); lv_obj_set_size(g_res_list, RES_W, 256);
+    lv_obj_set_style_pad_bottom(g_res_list, 80, 0);
+    lv_obj_set_flex_flow(g_res_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(g_res_list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(g_res_list, 2, 0);
+    lv_obj_set_scroll_dir(g_res_list, LV_DIR_VER); lv_obj_set_scrollbar_mode(g_res_list, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_add_flag(g_res_list, LV_OBJ_FLAG_SCROLL_MOMENTUM);
+    curvelist_attach(&g_rcl, g_res_list, g_res_page, RES_W);
+    g_res_count = lv_label_create(g_res_page); lv_obj_add_flag(g_res_count, LV_OBJ_FLAG_HIDDEN);
+    g_zq = zune_pivot(g_res_page, "search", zq_back);
+    lv_obj_add_flag(g_zq, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_ext_click_area(g_zq, 10);
+    lv_obj_add_event_cb(g_zq, zq_edit, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *ul = lv_obj_create(g_res_page); lv_obj_remove_style_all(ul); kit_keep(ul);   /* the field line under the word */
+    lv_obj_set_size(ul, 230, 1); lv_obj_set_pos(ul, 100, 94); lv_obj_set_style_bg_color(ul, TC(ACCENT_PRIMARY), 0);
+    lv_obj_set_style_bg_opa(ul, LV_OPA_COVER, 0); lv_obj_remove_flag(ul, LV_OBJ_FLAG_CLICKABLE);
+    zune_status(g_res_page, SCR_SEARCH);
+    lv_obj_remove_flag(g_res_page, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(g_res_page);
+}
+int search_zune_enter(void){                                     /* screenmgr: on entry to Search */
+    if(!th_zune() || !g_res_page) return 0;
+    lv_obj_remove_flag(g_res_page, LV_OBJ_FLAG_HIDDEN);
+    const char *tq = getenv("ZSEARCH_Q");                          /* host renders */
+    if(tq){ zq_done(tq); return 1; }
+    if(!g_query[0]) lv_async_call(zq_edit_async, NULL);
+    return 1;
+}
 void search_create(lv_obj_t *root){
     g_root = root;
     lv_obj_set_style_bg_color(root, TC(CANVAS), 0);
@@ -409,6 +477,7 @@ void search_create(lv_obj_t *root){
     lv_obj_add_flag(g_res_page, LV_OBJ_FLAG_HIDDEN);
     g_digits = 0; paint_keys();
     g_query[0] = 0; query_changed();
+    if(th_zune()) zsearch_build(root);
     if((th_disco_family() || th_null())){
         g_land = lv_obj_create(root); lv_obj_remove_style_all(g_land);
         lv_obj_set_size(g_land, 360, 360);
@@ -417,3 +486,4 @@ void search_create(lv_obj_t *root){
         g_land_on = 1; land_build();
     }
 }
+void search_test_query(const char *q){ if(th_zune()) zq_done(q); }   /* host renders */

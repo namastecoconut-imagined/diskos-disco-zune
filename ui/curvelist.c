@@ -172,6 +172,7 @@ static void curve(curvelist_t *c){
 }
 static void dots(curvelist_t *c){
     if(th_braun()) return;                                       /* Braun: no position dots */
+    if(th_zune()){ if(c->cur != -3){ c->cur = -3; for(int k = 0; k < 11; k++) if(c->dot[k]) lv_obj_add_flag(c->dot[k], LV_OBJ_FLAG_HIDDEN); } return; }   /* Zune: none either (hidden once, not on every scroll step) */
     int32_t sy = lv_obj_get_scroll_y(c->list), sb = lv_obj_get_scroll_bottom(c->list), tot = sy + sb;
     if(th_null() && !c->disco_style){null_scroll_line(c->dot,11,sy,tot);return;}
     int idx = (tot <= 24) ? -1 : (int)((sy * 10 + tot / 2) / tot);

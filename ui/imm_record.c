@@ -14,19 +14,23 @@ void imm_record_set_overlays(const imm_overlay_t *o,int n){
 }
 /* the progress ring: an arc of the 344 px circle (outer r 172, 3 px wide) from 208 deg clockwise over 124 deg,
  * exactly where the LVGL arc sat. Pixels + their position along the arc + edge coverage, built once. */
-#define RING_MAXPX 3000
+#define RING_MAXPX 5000
 static uint32_t ring_idx[RING_MAXPX]; static uint16_t ring_pos[RING_MAXPX]; static uint8_t ring_cov[RING_MAXPX];
-static int ring_n=-1, ring_on, ring_val; static uint32_t ring_trk, ring_ind;
+static int ring_n=-1, ring_on, ring_val, ring_full; static uint32_t ring_trk, ring_ind;
 static void ring_build(void){
     ring_n=0;
-    for(int y=0;y<120 && ring_n<RING_MAXPX;y++)for(int x=0;x<360 && ring_n<RING_MAXPX;x++){
+    /* full (Zune): the whole rim, outer r 176, 3 px, from 12 o'clock clockwise - the hairline of its Now Playing */
+    double r_in = ring_full ? 172.5 : 168.5, r_out = ring_full ? 176.5 : 172.5, start = ring_full ? 270 : 208, sweep = ring_full ? 360 : 124;
+    int ymax = ring_full ? 360 : 120;
+    for(int y=0;y<ymax && ring_n<RING_MAXPX;y++)for(int x=0;x<360 && ring_n<RING_MAXPX;x++){
         double dx=x+0.5-180,dy=y+0.5-180,d=sqrt(dx*dx+dy*dy);
-        double cov=fmin(d-168.5,172.5-d); if(cov<=0)continue; if(cov>1)cov=1;
+        double cov=fmin(d-r_in,r_out-d); if(cov<=0)continue; if(cov>1)cov=1;
         double a=atan2(dy,dx)*180.0/3.141592653589793; if(a<0)a+=360;
-        double t=a-208; if(t<0)t+=360; if(t>124)continue;
-        ring_idx[ring_n]=(uint32_t)(y*360+x); ring_pos[ring_n]=(uint16_t)(t*1000/124); ring_cov[ring_n]=(uint8_t)(cov*255); ring_n++;
+        double t=a-start; if(t<0)t+=360; if(t>sweep)continue;
+        ring_idx[ring_n]=(uint32_t)(y*360+x); ring_pos[ring_n]=(uint16_t)(t*1000/sweep); ring_cov[ring_n]=(uint8_t)(cov*255); ring_n++;
     }
 }
+void imm_record_set_ring_full(int full){ full = !!full; if(full != ring_full){ ring_full = full; ring_n = -1; } }
 void imm_record_set_ring(int on,int permille,uint32_t trk,uint32_t ind){
     if(ring_n<0)ring_build();
     ring_on=on; ring_val=permille<0?0:permille>1000?1000:permille; ring_trk=trk; ring_ind=ind;

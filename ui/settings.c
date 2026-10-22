@@ -348,7 +348,9 @@ static void apply_ma_on(int v){ ma_set_on(v); }
 static void apply_ma_server(int v){ (void)v; ma_edit_server(); }
 static void apply_ma_name(int v){ (void)v; ma_edit_name(); }
 
-static void apply_workmode(int v){ (void)v; modes_open(); }  /* opens SCR_WORKMODE (source-mode picker) */
+static void apply_workmode(int v){ (void)v; modes_open(); }
+#include "modes.h"
+static void apply_output(int v){ (void)v; if(th_zune()) modes_output_open(); }   /* Zune: Figma 81 output dial */  /* opens SCR_WORKMODE (source-mode picker) */
 static void apply_eq_custom(int v){ (void)v; screen_show(SCR_EQ); }  /* opens Custom EQ */
 static void apply_disco_menu(int v){ (void)v; disco_menu_open(); }     /* fork: Disco theme only */
 /* Display > Disco Options: the "Disco" rows on the same list screen; back returns to Display (settings_back_consumed) */
@@ -548,8 +550,9 @@ static void restart_tick(lv_timer_t *t){
     }
     if(lv_tick_elaps(g_rst_t0) >= RESTART_SYNC_MS) restart_fail("Couldn't restart - card busy, try again", "sync still running after 15 s");
 }
-static void boot_confirm_cb(lv_event_t *e){
-    if(lv_event_get_code(e)!=LV_EVENT_CLICKED) return;
+static void boot_confirm_go(void);
+static void boot_confirm_cb(lv_event_t *e){ if(lv_event_get_code(e)==LV_EVENT_CLICKED) boot_confirm_go(); }
+static void boot_confirm_go(void){
     if(g_rst_timer) return;                         /* already restarting */
     if(rst_reap_free() < 3){ ui_toast("Couldn't restart - try again"); return; }   /* sync + clock + reboot fallback */
     /* Stop our own SD work: closing admission alone is not enough - a scan holds one lease for its whole walk and
@@ -582,7 +585,13 @@ static void boot_modal_pill(lv_obj_t *card, int x, const char *txt, theme_color_
     lv_obj_center(l);
 }
 static const char *g_restart_note;   /* one-shot subtitle for the next restart modal (settings_restart_prompt) */
+void zune_confirm(const char *title, const char *body, const char *no, const char *yes, void (*on_yes)(void));
 static void apply_restart(int v){ (void)v;
+    if(th_zune()){
+        const char *n = g_restart_note; g_restart_note = NULL;
+        char b[160]; snprintf(b, sizeof b, "%s", n ? n : "boots your default ui. hold vol-up at power-on for the other one.");
+        if(n) for(char *c = b; *c; c++) if(*c >= 'A' && *c <= 'Z') *c += 32;
+        zune_confirm("restart now?", b, "cancel", "restart", boot_confirm_go); return; }
     boot_modal_close();
     g_boot_modal = lv_obj_create(lv_layer_top());
     lv_obj_remove_style_all(g_boot_modal);
@@ -696,6 +705,9 @@ static const char *const OPT_NPFONT[] = {"Original", "Inter Semibold", "Nunito B
 static const char *const OPT_FONTSIZE[] = { "Small", "Medium", "Large" };
 static const char *const OPT_ALBUMVIEW[] = { "List", "Cover Flow" };
 static const char *const OPT_SAVERSTYLE[] = { "Cover", "Analog", "Minimal", "Digital", "Vinyl", "Ring" };
+static const char *const OPT_ZLOCK[] = { "Album Art", "Clock Only" };                 /* Zune lock screen (Figma 78) */
+static const char *const OPT_ZLOCK_D[] = { "The cover, time and song while music plays.", "Always the big clock." };
+static const char *const OPT_ZTINT[] = { "White", "All Accent", "Minutes", "Colon", "Hours" };
 static const char *const OPT_DISCCOLOUR[] = { "Black", "Turquoise", "Pink" };
 static const char *const OPT_BOOTDEF[] = { "diskOS", "Stock" };
 static const char *const OPT_ARTCACHE[] = { "Covers only","When Idle","Idle & Charging" };
@@ -762,6 +774,8 @@ static const setting_t TABLE[] = {
      * until you pick a value diskOS sends nothing + the player keeps its own setting. */
     { "Audio",    "Working Mode", ST_ACTION, NULL, 0,0,0, NULL,0, LV_SYMBOL_RIGHT, apply_workmode, 0,
       "Switch the audio source: local playback, USB DAC, Bluetooth receiving, or USB storage.", NULL },
+    { "Audio",    "Output",      ST_ACTION, NULL, 0,0,0, NULL,0, LV_SYMBOL_RIGHT, apply_output, 0,
+      "Where the sound goes: the headphone jack, a USB-C DAC or headphones, SPDIF, or Bluetooth.", NULL },
     { "Audio",    "Gain",        ST_CYCLER, "audio_gain",   0,0,0, OPT_GAIN, 2, NULL, apply_gain, 0,
       "Headphone output gain. High drives demanding headphones louder.", NULL },
     { "Audio",    "DAC Filter",  ST_CYCLER, "audio_filter", 0,0,0, OPT_DFILTER, 6, NULL, apply_dac_filter, 1,
@@ -855,6 +869,10 @@ static const setting_t TABLE[] = {
       "Choose Cover, Analog, Minimal, Digital, Vinyl or Ring screensaver.", NULL },
     { "Standby",  "Screen Off",  ST_CYCLER, "screenoff_idx", 0,0,0, OPT_POWER, 5, NULL, NULL, 3,
       "How long after the screensaver the screen turns fully off.", NULL },
+    { "Standby",  "Lock Screen", ST_CYCLER, "zlock_src", 0,0,0, OPT_ZLOCK, 2, NULL, NULL, 0,
+      "What the lock screen shows while music plays.", OPT_ZLOCK_D },
+    { "Standby",  "Clock Accent", ST_CYCLER, "zlock_tint", 0,0,0, OPT_ZTINT, 5, NULL, NULL, 4,
+      "Which part of the lock-screen clock takes the accent colour.", NULL },
     { "Online & Extras",  "Online Album Art", ST_TOGGLE, "online_art", 0,1,1, NULL, 0, NULL, apply_online_art, 0,
       "Fetch missing covers over Wi-Fi, once per album. Playback is unaffected.", NULL },
     { "Online & Extras",  "Online Lyrics", ST_TOGGLE, "online_lyrics", 0,1,1, NULL, 0, NULL, NULL, 1,
@@ -1129,11 +1147,12 @@ static void rescan_row_tick(lv_timer_t *t){
         int done = 0; scanner_progress(&done, NULL);
         if(done >= 1000) snprintf(b, sizeof b, "Scanning... %d,%03d", done / 1000, done % 1000);
         else             snprintf(b, sizeof b, "Scanning... %d", done);
+        if(th_zune()){ for(char *c = b; *c; c++) if(*c >= 'A' && *c <= 'Z') *c += 32; }
         setting_text_if_changed(rr->lbl, b);
-        setting_text_if_changed(rr->vl, tr("Stop"));
+        setting_text_if_changed(rr->vl, th_zune() ? "tap to stop" : tr("Stop"));
     } else {
-        setting_text_if_changed(rr->lbl, tr("Rescan Library"));
-        setting_text_if_changed(rr->vl, tr("Scan"));
+        setting_text_if_changed(rr->lbl, th_zune() ? "rescan library" : tr("Rescan Library"));
+        setting_text_if_changed(rr->vl, th_zune() ? "looks for new and changed music" : tr("Scan"));
     }
 }
 static void rescan_row_del_cb(lv_event_t *e){
@@ -1199,7 +1218,9 @@ static const struct { const char *child, *parent; } SUBGROUP[] = {
 int settings_back_consumed(void){
     if(!g_active_group) return 0;
     for(size_t i = 0; i < sizeof SUBGROUP / sizeof SUBGROUP[0]; i++)
-        if(!strcmp(g_active_group, SUBGROUP[i].child)){ g_active_group = SUBGROUP[i].parent; setlist_refresh(); return 1; }
+        if(!strcmp(g_active_group, SUBGROUP[i].child)){
+            if(th_zune() && !strcmp(SUBGROUP[i].parent, "System")) return 0;   /* Zune lists these on the root */
+            g_active_group = SUBGROUP[i].parent; setlist_refresh(); return 1; }
     return 0;
 }
 /* Category order for the top-level Settings screen (must match the group strings used in TABLE). */
@@ -1276,8 +1297,263 @@ static void nav_apply_cb(lv_event_t *e){
     if(simple_cfg_set_int(g_active->cfg_key,g_nav_pending)<0){ui_toast("Couldn't save settings");return;}
     ui_toast("Saved");screen_back();
 }
+/* ==== Zune settings (Figma 49-59, 76): the root as a dial of sections, each section a pivot page of rows (name over
+ * its value in the accent, on/off rows as a switch), choices as a dial, sliders as an arc on the rim ==== */
+#include "zune_dial.h"
+LV_FONT_DECLARE(font_zune_regular_19) LV_FONT_DECLARE(font_zune_regular_12) LV_FONT_DECLARE(font_zune_semibold_11)
+LV_FONT_DECLARE(font_zune_light_96) LV_FONT_DECLARE(font_zune_regular_14)
+static void row_cb(lv_event_t *e);
+static void list_back_cb(lv_event_t *e);
+static lv_obj_t *make_list(lv_obj_t *root);
+static void zlower(char *o, size_t n, const char *s){
+    size_t i = 0; for(; s && s[i] && i + 1 < n; i++) o[i] = (s[i] >= 'A' && s[i] <= 'Z') ? s[i] + 32 : s[i]; o[i] = 0;
+}
+/* the root: System's pages come up a level (the design lists power, date & time... beside display) */
+static const struct { const char *name, *group, *sub; } ZSET[] = {
+    { "playback",    "Playback",    "play mode, resume, up next" },
+    { "audio",       "Audio",       "output, gain, filter" },
+    { "display",     "Display",     "brightness, theme, lock screen" },
+    { "network",     "Network",     "wi-fi, bluetooth" },
+    { "power",       "Power",       "sleep timer, charging limit" },
+    { "date & time", "Date & Time", "time zone, 24-hour clock" },
+    { "controls",    "Controls",    "volume keys, language" },
+    { "library",     "Library",     "rescan, import playlists" },
+    { "battery",     NULL,          "charge and playback left" },
+    { "maintenance", "Maintenance", "update, restart, reset" },
+    { "about",       "About",       "model, firmware, storage" },
+};
+#define ZSET_N ((int)(sizeof ZSET / sizeof ZSET[0]))
+static int g_zset_focus = 2;
+static void zset_go(void *p){
+    int i = (int)(intptr_t)p;
+    if(!ZSET[i].group){ screen_show(SCR_USAGE); return; }
+    g_active_group = ZSET[i].group; screen_show(SCR_SETLIST);
+}
+static void zset_pick(int i){ if(i < 0 || i >= ZSET_N) return; g_zset_focus = i; lv_async_call(zset_go, (void *)(intptr_t)i); }
+static void zsettings_root(lv_obj_t *root){
+    lv_obj_clean(root);
+    lv_obj_set_style_bg_color(root, TC(CANVAS), 0); lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(root, LV_OBJ_FLAG_SCROLLABLE);
+    const char *lb[ZSET_N]; for(int i = 0; i < ZSET_N; i++) lb[i] = ZSET[i].name;
+    zdial_wrap_next();                                             /* the settings dial loops, like home */
+    zdial_build(root, lb, ZSET_N, g_zset_focus, zset_pick, 74, "settings.zune");
+    for(int i = 0; i < ZSET_N; i++) zdial_set_sub(i, ZSET[i].sub);
+    zune_status(root, SCR_SETTINGS);
+    lv_obj_t *t = lv_label_create(root); kit_keep(t); lv_label_set_text(t, "SETTINGS");
+    lv_obj_set_style_text_font(t, &font_zune_semibold_11, 0); lv_obj_set_style_text_letter_space(t, 2, 0);
+    lv_obj_set_style_text_color(t, TC(TEXT_MUTED), 0); lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 34);
+}
+
+/* a section page */
+static int zis_onoff(const setting_t *s){
+    return s->type == ST_TOGGLE || (s->type == ST_CYCLER && s->nopts == 2 && !strcmp(s->opts[0], "Off") && !strcmp(s->opts[1], "On"));
+}
+static void zswitch_paint(lv_obj_t *sw, int on){
+    lv_obj_set_style_bg_color(sw, on ? TC(ACCENT_PRIMARY) : TC(CONTROL_TRACK), 0);
+    lv_obj_t *k = lv_obj_get_child(sw, 0);
+    if(k) lv_obj_align(k, on ? LV_ALIGN_RIGHT_MID : LV_ALIGN_LEFT_MID, on ? -3 : 3, 0);
+}
+static void zrow_toggle_cb(lv_event_t *e){
+    if(lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    lv_obj_t *row = lv_event_get_current_target(e);
+    int idx = (int)(uintptr_t)lv_event_get_user_data(e);
+    const setting_t *s = &TABLE[idx];
+    if(display_blocked(s)) return;
+    if(setting_unavailable(s)){ ui_toast(tr("Not supported on this install")); return; }
+    set_val(s, !get_val(s));
+    lv_obj_t *sw = lv_obj_get_child(row, -1);
+    if(sw) zswitch_paint(sw, get_val(s) != 0);
+}
+/* rows hug the glass: the further from the middle, the further in */
+static void zcurve(lv_obj_t *list){
+    for(uint32_t i = 0; i < lv_obj_get_child_count(list); i++){
+        lv_obj_t *r = lv_obj_get_child(list, i);
+        lv_area_t a; lv_obj_get_coords(r, &a);
+        if(a.y2 < -60 || a.y1 > 420) continue;
+        int cy = (a.y1 + a.y2) / 2, dy = abs(cy - 172), x = 30 + dy * dy / 190;
+        if(x > 150) x = 150;
+        int e = abs(cy - 180) + 12; int right = e < 178 ? 180 + (int)sqrtf((float)(180 * 180 - e * e)) - 24 : 200;
+        if(right > 330) right = 330;
+        lv_obj_set_style_translate_x(r, x, 0);
+        lv_obj_set_width(r, right - x > 120 ? right - x : 120);
+    }
+}
+static void zcurve_cb(lv_event_t *e){ zcurve(lv_event_get_target(e)); }
+static void zsetlist(lv_obj_t *root){
+    char t[64]; zlower(t, sizeof t, g_active_group);
+    lv_obj_t *list = make_list(root);
+    lv_obj_set_pos(list, 0, 100); lv_obj_set_size(list, 360, 260);
+    lv_obj_set_style_pad_row(list, 4, 0); lv_obj_set_style_pad_top(list, 6, 0); lv_obj_set_style_pad_bottom(list, 110, 0);
+    lv_obj_set_style_pad_left(list, 0, 0); lv_obj_set_style_pad_right(list, 0, 0);
+    lv_obj_set_flex_align(list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_add_event_cb(list, zcurve_cb, LV_EVENT_SCROLL, NULL);
+    int indices[N_SETTINGS], count = 0;
+    for(int i = 0; i < N_SETTINGS; i++){
+        const setting_t *s = &TABLE[i]; const display_entry_t *d = display_entry(s);
+        const char *page = d ? d->page : s->group;
+        if(!page || strcmp(page, g_active_group) || display_variant_hidden(s) || display_disabled_reason(s)) continue;
+        if(s->cfg_key && !strcmp(s->cfg_key, "saver_style")) continue;     /* Zune has one lock screen, whatever the style */
+        if(s->apply == apply_disco_qs_items && !strcmp(s->group, "Text & Layout")) continue;
+        int at = count, order = d ? d->order : 1000 + i;
+        while(at > 0){
+            const display_entry_t *prev = display_entry(&TABLE[indices[at - 1]]);
+            if((prev ? prev->order : 1000 + indices[at - 1]) <= order) break;
+            indices[at] = indices[at - 1]; --at;
+        }
+        indices[at] = i; ++count;
+    }
+    for(int ri = 0; ri < count; ri++){
+        int i = indices[ri]; const setting_t *s = &TABLE[i];
+        lv_obj_t *row = lv_obj_create(list); lv_obj_remove_style_all(row); kit_keep(row);
+        lv_obj_set_size(row, 300, 50); lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+        int onoff = zis_onoff(s);
+        if(onoff) ui_on(row, zrow_toggle_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)i, "settings.zrow", UI_CORE);
+        else ui_on(row, row_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)i, "settings.row", UI_CORE);
+        char nm[64]; zlower(nm, sizeof nm, tr(display_label(s)));
+        lv_obj_t *l = lv_label_create(row); kit_keep(l); lv_label_set_text(l, nm);
+        lv_obj_set_style_text_font(l, zune_font(&font_zune_regular_19), 0); lv_obj_set_style_text_color(l, TC(TEXT_PRIMARY), 0);
+        lv_label_set_long_mode(l, LV_LABEL_LONG_SCROLL_CIRCULAR); lv_obj_set_width(l, onoff ? lv_pct(70) : lv_pct(96));
+        char b[48], v[48]; v[0] = 0;
+        if(!onoff && s->type != ST_TOGGLE){
+            const char *vt = (s->type == ST_ACTION && !s->ro_val) ? "" : val_text(s, b, sizeof b);
+            if(vt && strcmp(vt, LV_SYMBOL_RIGHT)) zlower(v, sizeof v, vt);
+            if(!strcmp(v, nm)) v[0] = 0;                    /* "restart" under "restart" says nothing */
+        }
+        lv_obj_t *vl = lv_label_create(row); kit_keep(vl); lv_label_set_text(vl, v);
+        lv_obj_set_style_text_font(vl, zune_font(&font_zune_regular_12), 0);
+        lv_obj_set_style_text_color(vl, (s->type == ST_READONLY || s->type == ST_ACTION || setting_unavailable(s)) ? TC(TEXT_MUTED) : TC(ACCENT_PRIMARY), 0);
+        lv_label_set_long_mode(vl, LV_LABEL_LONG_SCROLL_CIRCULAR); lv_obj_set_width(vl, lv_pct(92));
+        if(v[0]){ lv_obj_set_pos(l, 0, 4); lv_obj_set_pos(vl, 2, 30); }
+        else { lv_obj_align(l, LV_ALIGN_LEFT_MID, 0, 0); lv_obj_add_flag(vl, LV_OBJ_FLAG_HIDDEN); }
+        g_list_rows[i] = vl;
+        if(s->apply == apply_rescan){
+            rescan_row_t *rr = malloc(sizeof *rr);
+            if(rr){ rr->lbl = l; rr->vl = vl; lv_obj_remove_flag(vl, LV_OBJ_FLAG_HIDDEN);
+                    lv_obj_set_pos(l, 0, 4); lv_obj_set_pos(vl, 2, 30);
+                    rr->tm = lv_timer_create(rescan_row_tick, 400, rr);
+                    lv_obj_add_event_cb(row, rescan_row_del_cb, LV_EVENT_DELETE, rr); rescan_row_tick(rr->tm); }
+        }
+        if(onoff){
+            lv_obj_t *sw = lv_obj_create(row); lv_obj_remove_style_all(sw); kit_keep(sw);
+            lv_obj_set_size(sw, 36, 20); lv_obj_set_style_radius(sw, LV_RADIUS_CIRCLE, 0); lv_obj_set_style_bg_opa(sw, LV_OPA_COVER, 0);
+            lv_obj_align(sw, LV_ALIGN_RIGHT_MID, -4, 0);
+            lv_obj_remove_flag(sw, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_t *k = lv_obj_create(sw); lv_obj_remove_style_all(k); kit_keep(k);
+            lv_obj_set_size(k, 14, 14); lv_obj_set_style_radius(k, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_bg_color(k, TC(FIXED_MEDIA_WHITE), 0); lv_obj_set_style_bg_opa(k, LV_OPA_COVER, 0);
+            lv_obj_remove_flag(k, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+            zswitch_paint(sw, get_val(s) != 0);
+            if(setting_unavailable(s)) lv_obj_set_style_opa(sw, LV_OPA_40, 0);
+        }
+    }
+    if(!count){
+        lv_obj_t *e = lv_label_create(list); kit_keep(e); lv_label_set_text(e, "nothing to set here");
+        lv_obj_set_style_text_font(e, zune_font(&font_zune_regular_14), 0); lv_obj_set_style_text_color(e, TC(TEXT_MUTED), 0);
+    }
+    for(int k = 0; k < 2; k++){                                           /* fades: top and bottom */
+        lv_obj_t *f = lv_obj_create(root); lv_obj_remove_style_all(f); kit_keep(f);
+        lv_obj_set_size(f, 360, k ? 100 : 112); lv_obj_align(f, k ? LV_ALIGN_BOTTOM_MID : LV_ALIGN_TOP_MID, 0, 0);
+        lv_obj_set_style_bg_color(f, TC(CANVAS), 0); lv_obj_set_style_bg_grad_color(f, TC(CANVAS), 0);
+        lv_obj_set_style_bg_grad_dir(f, LV_GRAD_DIR_VER, 0); lv_obj_set_style_bg_opa(f, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_main_opa(f, k ? LV_OPA_TRANSP : LV_OPA_COVER, 0); lv_obj_set_style_bg_grad_opa(f, k ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+        lv_obj_set_style_bg_main_stop(f, k ? 0 : 150, 0); lv_obj_set_style_bg_grad_stop(f, k ? 170 : 255, 0);
+        lv_obj_remove_flag(f, LV_OBJ_FLAG_CLICKABLE);
+    }
+    zune_pivot(root, t, list_back_cb);
+    zune_status(root, SCR_SETLIST);
+    lv_obj_update_layout(list); zcurve(list);
+}
+
+/* a choice: the options as a dial, the current one in the accent; a slider: an arc on the rim with the value big */
+static void zdetail_back(void *u){ (void)u; screen_back(); }
+static void zdetail_pick(int i){
+    const setting_t *s = g_active;
+    if(!s || display_blocked(s) || i < 0 || i >= s->nopts) return;
+    int is_theme = s->cfg_key && !strcmp(s->cfg_key, "theme_preset");
+    if(is_theme && g_reload_tm) return;
+    if(i != get_val(s) || (is_theme && i != theme_preset())) set_val(s, i);
+    if(is_theme && g_reload_tm) return;                     /* the UI re-launches into the new theme */
+    lv_async_call(zdetail_back, NULL);
+}
+static lv_obj_t *g_zsl_num, *g_zsl_unit;
+static void zslider_show(const setting_t *s, int v){
+    char b[24]; fmt_slider(s, v, b, sizeof b);
+    char num[24]; size_t n = 0;                             /* the figure big; any unit letters small under it */
+    for(const char *p = b; *p && n + 1 < sizeof num; p++) if((*p >= '0' && *p <= '9') || *p == '%' || *p == '.' || *p == '-' || *p == ':') num[n++] = *p;
+    num[n] = 0;
+    lv_label_set_text(g_zsl_num, n ? num : b);
+    char u[48]; if(n && strlen(num) != strlen(b)) zlower(u, sizeof u, b); else u[0] = 0;
+    lv_label_set_text(g_zsl_unit, u);
+}
+static void zarc_cb(lv_event_t *e){
+    const setting_t *s = g_active; if(!s || display_blocked(s)) return;
+    lv_obj_t *a = lv_event_get_target(e);
+    int v = lv_arc_get_value(a);
+    if(s->step > 1) v = s->min + (v - s->min + s->step / 2) / s->step * s->step;
+    if(lv_event_get_code(e) == LV_EVENT_VALUE_CHANGED){ if(s->apply) s->apply(v); zslider_show(s, v); }
+    else if(lv_event_get_code(e) == LV_EVENT_RELEASED && !outdoor_holds(s) && s->cfg_key){
+        simple_cfg_set_int(s->cfg_key, v);
+        if(!strcmp(s->cfg_key, "ma_delay_ms")) ma_delay_changed();
+    }
+}
+static int zdetail(lv_obj_t *root){
+    const setting_t *s = g_active;
+    if(s->type == ST_SLIDER){
+        lv_obj_clean(root);
+        lv_obj_set_style_bg_color(root, TC(CANVAS), 0); lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
+        lv_obj_remove_flag(root, LV_OBJ_FLAG_SCROLLABLE);
+        int v = get_val(s); if(outdoor_holds(s)) v = ui_effective_brightness();
+        lv_obj_t *a = lv_arc_create(root); kit_keep(a);
+        lv_obj_set_size(a, 336, 336); lv_obj_center(a);
+        lv_arc_set_rotation(a, 135); lv_arc_set_bg_angles(a, 0, 270);
+        lv_arc_set_range(a, s->min, s->max); lv_arc_set_value(a, v);
+        lv_obj_set_style_arc_width(a, 4, LV_PART_MAIN); lv_obj_set_style_arc_width(a, 6, LV_PART_INDICATOR);
+        lv_obj_set_style_arc_color(a, TC(CONTROL_TRACK), LV_PART_MAIN); lv_obj_set_style_arc_color(a, TC(ACCENT_PRIMARY), LV_PART_INDICATOR);
+        lv_obj_set_style_arc_rounded(a, true, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(a, TC(ACCENT_PRIMARY), LV_PART_KNOB); lv_obj_set_style_bg_opa(a, LV_OPA_COVER, LV_PART_KNOB);
+        lv_obj_set_style_pad_all(a, 6, LV_PART_KNOB);
+        lv_obj_set_ext_click_area(a, 16);
+        if(outdoor_holds(s)) lv_obj_add_state(a, LV_STATE_DISABLED);
+        lv_obj_add_event_cb(a, zarc_cb, LV_EVENT_VALUE_CHANGED, NULL);
+        lv_obj_add_event_cb(a, zarc_cb, LV_EVENT_RELEASED, NULL);
+        lv_obj_t *cap = lv_label_create(root); kit_keep(cap); char c[64], cu[64]; zlower(c, sizeof c, tr(display_label(s)));
+        for(size_t k = 0; ; k++){ cu[k] = (c[k] >= 'a' && c[k] <= 'z') ? c[k] - 32 : c[k]; if(!c[k] || k + 2 >= sizeof cu){ cu[k] = 0; break; } }
+        lv_label_set_text(cap, cu); lv_obj_set_style_text_font(cap, &font_zune_semibold_11, 0);
+        lv_obj_set_style_text_letter_space(cap, 2, 0); lv_obj_set_style_text_color(cap, TC(TEXT_MUTED), 0);
+        lv_obj_align(cap, LV_ALIGN_TOP_MID, 0, 104);
+        g_zsl_num = lv_label_create(root); kit_keep(g_zsl_num);
+        lv_obj_set_style_text_font(g_zsl_num, zune_font(&font_zune_light_96), 0); lv_obj_set_style_text_color(g_zsl_num, TC(TEXT_PRIMARY), 0);
+        lv_obj_align(g_zsl_num, LV_ALIGN_TOP_MID, 0, 118);
+        g_zsl_unit = lv_label_create(root); kit_keep(g_zsl_unit);
+        lv_obj_set_style_text_font(g_zsl_unit, zune_font(&font_zune_regular_12), 0); lv_obj_set_style_text_color(g_zsl_unit, TC(TEXT_MUTED), 0);
+        lv_obj_align(g_zsl_unit, LV_ALIGN_TOP_MID, 0, 250);
+        zslider_show(s, v);
+        lv_obj_t *h = lv_label_create(root); kit_keep(h); lv_label_set_text(h, "drag around the rim");
+        lv_obj_set_style_text_font(h, zune_font(&font_zune_regular_12), 0); lv_obj_set_style_text_color(h, TC(TEXT_MUTED), 0);
+        lv_obj_align(h, LV_ALIGN_TOP_MID, 0, 272);
+        return 1;
+    }
+    if((s->type == ST_CYCLER || s->type == ST_CHOICE) && !nav_setting(s) && s->nopts > 0 && s->nopts <= ZDIAL_MAX
+       && !(s->cfg_key && !strcmp(s->cfg_key, "disco_side_pick"))){
+        lv_obj_clean(root);
+        lv_obj_set_style_bg_color(root, TC(CANVAS), 0); lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
+        lv_obj_remove_flag(root, LV_OBJ_FLAG_SCROLLABLE);
+        static char names[ZDIAL_MAX][40]; const char *lb[ZDIAL_MAX];
+        for(int i = 0; i < s->nopts; i++){ zlower(names[i], sizeof names[i], tr(s->opts[i])); lb[i] = names[i]; }
+        int v = get_val(s); if(v < 0 || v >= s->nopts) v = 0;
+        zdial_build(root, lb, s->nopts, v, zdetail_pick, 100, "settings.zdetail");
+        zdial_set_color(v, TC(ACCENT_PRIMARY));
+        if(s->opt_descs) for(int i = 0; i < s->nopts; i++) if(s->opt_descs[i]){ char d[120]; zlower(d, sizeof d, tr(s->opt_descs[i])); zdial_set_sub(i, d); }
+        char t[64]; zlower(t, sizeof t, tr(display_label(s)));
+        zune_pivot(root, t, detail_back_cb);
+        zune_status(root, SCR_SETTING_DETAIL);
+        return 1;
+    }
+    return 0;
+}
 void setting_detail_refresh(void){
     if(!g_detail_root || !g_active) return;
+    if(th_zune() && zdetail(g_detail_root)) return;
     lv_obj_clean(g_detail_root);
     lv_obj_set_style_bg_color(g_detail_root, TC(CANVAS), 0);
     lv_obj_set_style_bg_opa(g_detail_root, LV_OPA_COVER, 0);
@@ -1321,7 +1597,7 @@ void setting_detail_refresh(void){
         int is_theme = !strcmp(s->cfg_key, "theme_preset");
         /* Themes: Disco first, then Ring, Braun and Stone; the other presets stay in the code and keep working if
          * already selected, but are not offered here for now. Rows still carry the real preset index. */
-        int THEME_SHOWN[6] = { THEME_PRESET_DISCO, THEME_PRESET_NULL, THEME_PRESET_SIMPLE, THEME_PRESET_RING, THEME_PRESET_BRAUN, THEME_PRESET_STONE }, nshown = 6;
+        int THEME_SHOWN[7] = { THEME_PRESET_ZUNE, THEME_PRESET_DISCO, THEME_PRESET_NULL, THEME_PRESET_SIMPLE, THEME_PRESET_RING, THEME_PRESET_BRAUN, THEME_PRESET_STONE }, nshown = 7;
         int nrows = is_theme ? nshown : s->nopts;
         for(int r = 0; r < nrows; r++){
             int i = is_theme ? THEME_SHOWN[r] : r;
@@ -1564,6 +1840,7 @@ void settings_create(lv_obj_t *root){
     lv_obj_set_style_bg_color(root, TC(CANVAS), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
     if(th_disco_family() || th_null()){ settings_disco_list(root); return; }
+    if(th_zune()) return;                                   /* Zune: the dial is built on every entry */
     /* orbit: the five categories circle a grey-ringed hub; one sits at the bottom, the top holds the title */
     orbit_title(root, "Settings");
     static const char *GICON[N_GROUPS] = { LV_SYMBOL_PLAY, LV_SYMBOL_AUDIO, LV_SYMBOL_IMAGE,
@@ -1579,7 +1856,7 @@ void settings_create(lv_obj_t *root){
 }
 
 /* Category list is static; nothing to re-sync when SCR_SETTINGS is (re)shown. */
-void settings_refresh_list(void){ }
+void settings_refresh_list(void){ if(th_zune()){ lv_obj_t *r = screen_get_root(SCR_SETTINGS); if(r) zsettings_root(r); } }
 static const char *row_value(const setting_t *s,char *buf,int n){
     if(display_disabled_reason(s)){snprintf(buf,n,"Disabled");return buf;}
     if(th_null() && s->cfg_key && !strcmp(s->cfg_key,"null_side")){snprintf(buf,n,"Disabled");return buf;}
@@ -1658,6 +1935,7 @@ void setlist_refresh(void){
     lv_obj_set_style_bg_opa(g_setlist_root, LV_OPA_COVER, 0);
     ui_header_cb(g_setlist_root, g_active_group, list_back_cb);   /* title = category; back pops to categories */
 
+    if(th_zune() && strcmp(g_active_group, "How to")){ lv_obj_clean(g_setlist_root); zsetlist(g_setlist_root); return; }
     if(!strcmp(g_active_group,"How to")){howto_body(g_setlist_root);return;}
     lv_obj_t *list = make_list(g_setlist_root);
     static curvelist_t cl; curvelist_attach(&cl, list, g_setlist_root, 288);   /* theme: every list curves + dots */
@@ -1735,3 +2013,8 @@ void settings_test_scroll(int y){                                     /* host re
     while(n){ lv_obj_t *c = st[--n];
         if(lv_obj_get_scroll_bottom(c) > 0){ lv_obj_scroll_to_y(c, y, LV_ANIM_OFF); return; }
         for(uint32_t i = 0; i < lv_obj_get_child_count(c) && n < 64; i++) st[n++] = lv_obj_get_child(c, i); } }
+/* host renders: open the detail page of the setting saved under key */
+void settings_test_open_key(const char *key){
+    for(int i = 0; key && i < N_SETTINGS; i++) if(TABLE[i].cfg_key && !strcmp(TABLE[i].cfg_key, key)){
+        g_active = &TABLE[i]; screen_show(SCR_SETTING_DETAIL); setting_detail_refresh(); return; }
+}

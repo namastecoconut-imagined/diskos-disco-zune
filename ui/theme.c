@@ -341,7 +341,7 @@ static const uint32_t DEFAULT_LIGHT[THEME_CLR_COUNT] = {
 #include "theme_presets.inc"   /* generated: tools/gen_theme_presets.py */
 
 typedef struct { const char *name; const uint32_t *dark, *light; } theme_preset_t;
-static uint32_t FORK_RING[2][THEME_CLR_COUNT], FORK_BRAUN[2][THEME_CLR_COUNT], FORK_DISCO[2][THEME_CLR_COUNT], FORK_NULL[2][THEME_CLR_COUNT], FORK_SIMPLE[2][THEME_CLR_COUNT];
+static uint32_t FORK_RING[2][THEME_CLR_COUNT], FORK_BRAUN[2][THEME_CLR_COUNT], FORK_DISCO[2][THEME_CLR_COUNT], FORK_NULL[2][THEME_CLR_COUNT], FORK_SIMPLE[2][THEME_CLR_COUNT], FORK_ZUNE[2][THEME_CLR_COUNT];
 /* Sparse slots preserve every shipped theme ID; retired IDs are unavailable. */
 static const theme_preset_t PRESETS[THEME_PRESET_COUNT] = {
     THEME_PRESETS_GENERATED
@@ -350,10 +350,11 @@ static const theme_preset_t PRESETS[THEME_PRESET_COUNT] = {
     [THEME_PRESET_DISCO] = { "Disco", FORK_DISCO[0], FORK_DISCO[1] },
     [THEME_PRESET_NULL] = { "Null", FORK_NULL[0], FORK_NULL[1] },
     [THEME_PRESET_SIMPLE] = { "Squash", FORK_SIMPLE[0], FORK_SIMPLE[1] },
+    [THEME_PRESET_ZUNE] = { "Zune", FORK_ZUNE[0], FORK_ZUNE[1] },
 };
 _Static_assert(sizeof PRESETS / sizeof PRESETS[0] == THEME_PRESET_COUNT, "THEME_PRESET_COUNT (theme.h) is stale");
 const char *const theme_preset_names[THEME_PRESET_COUNT] = { THEME_PRESET_NAMES_GENERATED,
- [THEME_PRESET_RING]="Ring",[THEME_PRESET_BRAUN]="Braun",[THEME_PRESET_DISCO]="Disco",[THEME_PRESET_NULL]="Null",[THEME_PRESET_SIMPLE]="Squash" };
+ [THEME_PRESET_RING]="Ring",[THEME_PRESET_BRAUN]="Braun",[THEME_PRESET_DISCO]="Disco",[THEME_PRESET_NULL]="Null",[THEME_PRESET_SIMPLE]="Squash",[THEME_PRESET_ZUNE]="Zune" };
 int theme_preset_available(int preset){return preset>=0&&preset<THEME_PRESET_COUNT&&PRESETS[preset].name!=NULL;}
 static int g_preset;
 static uint32_t g_custom[2][THEME_CLR_COUNT];      /* the saved custom theme, fixed roles filled from Default */
@@ -588,6 +589,30 @@ static void null_palettes_init(void){
  }
 }
 
+
+/* Zune: pure black, white type, one hot accent (magenta by default; cfg zune_accent overrides). Hierarchy comes from
+ * size and opacity, so surfaces stay near-black and the accent marks only what is live or selected. */
+static void zune_palettes_init(void){
+ uint32_t acc=(uint32_t)cfg_get_int("zune_accent",0xEC008C);
+ for(int v=0;v<2;v++){
+  uint32_t *p=FORK_ZUNE[v];memcpy(p,FORK_RING[v],sizeof FORK_ZUNE[v]);
+  if(!v){
+   p[THEME_CLR_CANVAS]=0x000000;p[THEME_CLR_SURFACE]=0x1C1C1F;p[THEME_CLR_SURFACE_RAISED]=0x2A2A2E;
+   p[THEME_CLR_CONTROL_TRACK]=0x2E2E2E;p[THEME_CLR_TEXT_PRIMARY]=0xFFFFFF;p[THEME_CLR_TEXT_SECONDARY]=0x8A8A8A;
+   p[THEME_CLR_TEXT_MUTED]=0x8A8A8A;p[THEME_CLR_TEXT_LYRICS]=0xFFFFFF;p[THEME_CLR_TEXT_DISABLED]=0x4A4A4A;
+   p[THEME_CLR_ON_ACCENT]=0xFFFFFF;
+  } else {
+   p[THEME_CLR_CANVAS]=0xFFFFFF;p[THEME_CLR_SURFACE]=0xF0F0F0;p[THEME_CLR_SURFACE_RAISED]=0xE4E4E4;
+   p[THEME_CLR_CONTROL_TRACK]=0xD6D6D6;p[THEME_CLR_TEXT_PRIMARY]=0x000000;p[THEME_CLR_TEXT_SECONDARY]=0x6E6E6E;
+   p[THEME_CLR_TEXT_MUTED]=0x6E6E6E;p[THEME_CLR_TEXT_LYRICS]=0x000000;p[THEME_CLR_TEXT_DISABLED]=0xB4B4B4;
+   p[THEME_CLR_ON_ACCENT]=0xFFFFFF;
+  }
+  p[THEME_CLR_ACCENT_PRIMARY]=p[THEME_CLR_ACCENT_EMPHASIS]=p[THEME_CLR_ACCENT_IDLE]=acc;
+  p[THEME_CLR_SWITCH_ON]=p[THEME_CLR_CONTROL_FILL]=p[THEME_CLR_WIDGET_PRIMARY]=p[THEME_CLR_PAGE_DOT_ACTIVE]=acc;
+ }
+}
+int th_zune(void){return g_preset==THEME_PRESET_ZUNE;}
+
 static void simple_palettes_init(void){
  for(int v=0;v<2;v++){
   uint32_t *p=FORK_SIMPLE[v];memcpy(p,v?DEFAULT_LIGHT:DEFAULT_DARK,sizeof FORK_SIMPLE[v]);
@@ -630,7 +655,7 @@ static void fork_config_migrate(void){
 void theme_init(void){
     fork_palettes_init();
     disco_palettes_init();
-    null_palettes_init(); simple_palettes_init();
+    null_palettes_init(); simple_palettes_init(); zune_palettes_init();
     fork_config_migrate();
     int outdoor = cfg_get_int("outdoor", 0) == 1;
     g_outdoor = outdoor;
@@ -639,7 +664,7 @@ void theme_init(void){
     if(g_preset!=THEME_PRESET_CUSTOM&&!theme_preset_available(g_preset)){
         g_preset=THEME_PRESET_DISCO;cfg_set_int("theme_preset",g_preset);
     }
-    if(g_preset==THEME_PRESET_NULL)g_variant=0;
+    if(g_preset==THEME_PRESET_NULL||g_preset==THEME_PRESET_ZUNE)g_variant=0;   /* dark-only themes */
     if(theme_auto_supported() && cfg_get_int("theme_auto",0) && !outdoor){
         time_t now=time(NULL); struct tm tm; localtime_r(&now,&tm);
         g_variant = !(tm.tm_hour >= 20 || tm.tm_hour < 7);
@@ -1104,4 +1129,4 @@ int th_null(void){return g_preset==THEME_PRESET_NULL;}
 int th_disco(void){return g_preset==THEME_PRESET_DISCO;}
 int th_simple(void){return g_preset==THEME_PRESET_SIMPLE;}
 int th_disco_family(void){return th_disco() || th_simple();}
-int th_ringlike(void){return g_preset==THEME_PRESET_RING || g_preset==THEME_PRESET_DISCO || th_simple();}
+int th_ringlike(void){return g_preset==THEME_PRESET_RING || g_preset==THEME_PRESET_DISCO || g_preset==THEME_PRESET_ZUNE || th_simple();}

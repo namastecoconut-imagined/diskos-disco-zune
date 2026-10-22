@@ -8,8 +8,10 @@
  * through the SD write gate (nothing while the card is handed to a PC); copies and deletes run on a
  * worker thread with progress toasts; afterwards the folder refreshes and the library re-scans. */
 #include "screens.h"
+#include "zune_dial.h"
 #include "musicdb.h"
 #include "theme.h"
+#include "theme_kit.h"
 #include "braun.h"
 #include "orbit.h"
 #include "artcache.h"
@@ -213,6 +215,7 @@ static lv_obj_t *pill_btn(lv_obj_t *p, const char *txt, uint32_t bg, int x, lv_e
     return b;
 }
 static void confirm(const char *title, const char *detail, const char *yes, void (*on_yes)(void)){
+    if(th_zune()){ zune_confirm(title, detail, "cancel", yes, on_yes); return; }   /* Zune: Figma 07 */
     lv_obj_t *o = overlay();
     g_yes = on_yes;
     lv_obj_t *t = lv_label_create(o);
@@ -307,6 +310,28 @@ static void pick_here_cb(lv_event_t *e){
     }
     close_ov(); do_copy_move();
 }
+LV_FONT_DECLARE(font_zune_light_32) LV_FONT_DECLARE(font_zune_regular_19) LV_FONT_DECLARE(font_zune_regular_16) LV_FONT_DECLARE(font_zune_regular_13)
+static lv_obj_t *zpick_row(const char *txt, lv_event_cb_t cb, intptr_t i, int muted){   /* Zune: a bare text row, lower-case */
+    lv_obj_t *r = lv_obj_create(g_pick_list); lv_obj_remove_style_all(r); kit_keep(r);
+    lv_obj_set_size(r, 240, 38); lv_obj_add_flag(r, LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(r, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(r, cb, LV_EVENT_CLICKED, (void *)i);
+    lv_obj_t *l = lv_label_create(r); kit_keep(l); lv_label_set_text(l, txt);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_DOT); lv_obj_set_width(l, 230);
+    lv_obj_set_style_text_font(l, zune_font(muted ? &font_zune_regular_16 : &font_zune_regular_19), 0);
+    lv_obj_set_style_text_color(l, muted ? TC(TEXT_MUTED) : TC(TEXT_PRIMARY), 0);
+    lv_obj_set_style_text_color(l, TC(ACCENT_PRIMARY), LV_STATE_PRESSED);
+    lv_obj_add_flag(l, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_align(l, LV_ALIGN_LEFT_MID, 6, 0);
+    return r;
+}
+static void zpick_link(lv_obj_t *o, const char *txt, int x, int y, int accent, lv_event_cb_t cb){
+    lv_obj_t *l = lv_label_create(o); kit_keep(l); lv_label_set_text(l, txt);
+    lv_obj_set_style_text_font(l, zune_font(&font_zune_regular_16), 0);
+    lv_obj_set_style_text_color(l, accent ? TC(ACCENT_PRIMARY) : TC(TEXT_SECONDARY), 0);
+    lv_obj_add_flag(l, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_ext_click_area(l, 14);
+    lv_obj_add_event_cb(l, cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_align(l, LV_ALIGN_TOP_MID, x, y);
+}
 static void pick_fill(void){
     lv_obj_clean(g_pick_list);
     const char *base = strcmp(g_pick, FO_ROOT) ? strrchr(g_pick, '/') + 1 : "SD card";
@@ -321,6 +346,13 @@ static void pick_fill(void){
             snprintf(g_sub[g_nsub++], 256, "%s", e->d_name);
         }
         closedir(d); }
+    if(th_zune()){
+        lv_label_set_text(g_pick_title, base);
+        if(strcmp(g_pick, FO_ROOT)) zpick_row(".. up one level", pick_up_cb, 0, 1);
+        for(int i = 0; i < g_nsub; i++) zpick_row(g_sub[i], pick_row_cb, i, 0);
+        if(!g_nsub) zune_empty(g_pick_list, "no folders here", NULL);
+        return;
+    }
     if(strcmp(g_pick, FO_ROOT)){                                   /* first row: up a level (clear of the rim) */
         lv_obj_t *r = lv_button_create(g_pick_list);
         lv_obj_remove_style_all(r);
@@ -377,6 +409,31 @@ static void open_picker(int op){
     snprintf(g_pick, sizeof g_pick, "%s", g_dir);
     lv_obj_t *o = overlay();
     lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+    if(th_zune()){                                     /* Figma 71: lower-case Light header, the folder in accent, bare rows, text links */
+        lv_obj_t *h = lv_label_create(o); kit_keep(h);
+        lv_label_set_text(h, op == OP_COPY ? "copy to" : op == OP_MOVE ? "move to" : "copy or move");
+        lv_obj_set_style_text_font(h, zune_font(&font_zune_light_32), 0); lv_obj_set_style_text_color(h, TC(TEXT_PRIMARY), 0);
+        lv_obj_align(h, LV_ALIGN_TOP_MID, 0, 26);
+        g_pick_title = lv_label_create(o); kit_keep(g_pick_title);
+        lv_label_set_long_mode(g_pick_title, LV_LABEL_LONG_DOT); lv_obj_set_width(g_pick_title, 220);
+        lv_obj_set_style_text_align(g_pick_title, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_font(g_pick_title, zune_font(&font_zune_regular_13), 0); lv_obj_set_style_text_color(g_pick_title, TC(ACCENT_PRIMARY), 0);
+        lv_obj_align(g_pick_title, LV_ALIGN_TOP_MID, 0, 72);
+        g_pick_list = lv_obj_create(o); lv_obj_remove_style_all(g_pick_list); kit_keep(g_pick_list);
+        lv_obj_set_size(g_pick_list, 250, 180); lv_obj_align(g_pick_list, LV_ALIGN_TOP_MID, 0, 96);
+        lv_obj_set_flex_flow(g_pick_list, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_scroll_dir(g_pick_list, LV_DIR_VER); lv_obj_set_scrollbar_mode(g_pick_list, LV_SCROLLBAR_MODE_OFF);
+        if(op == OP_BOTH){
+            zpick_link(o, "copy here", -56, 286, 1, pick_copy_here_cb);
+            zpick_link(o, "move here", 56, 286, 1, pick_move_here_cb);
+            zpick_link(o, "cancel", 0, 318, 0, pick_cancel_cb);
+        } else {
+            zpick_link(o, "cancel", -56, 290, 0, pick_cancel_cb);
+            zpick_link(o, op == OP_COPY ? "copy here" : "move here", 56, 290, 1, pick_here_cb);
+        }
+        pick_fill();
+        return;
+    }
     lv_obj_t *h = lv_label_create(o);
     lv_label_set_text(h, op == OP_COPY ? "Copy to..." : op == OP_MOVE ? "Move to..." : "Copy or move to...");
     lv_obj_set_style_text_font(h, TH_F_CAPTION, 0); lv_obj_set_style_text_color(h, TC(TEXT_SECONDARY), 0);

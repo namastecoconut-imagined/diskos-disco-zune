@@ -371,10 +371,13 @@ static void weather_app_refresh(void)
     }
     lv_label_set_text(g_wd_cicon, g_have ? icon : "");
     lv_obj_set_style_text_color(g_wd_cicon, wd_col(icon), 0);
+    if(th_zune()){ size_t tl = strlen(temp); if(tl && (temp[tl - 1] == 'C' || temp[tl - 1] == 'F')) temp[tl - 1] = 0;   /* the Light figure has no letters */
+                   for(char *c = cond; *c; c++) if(*c >= 'A' && *c <= 'Z') *c += 32; }
     set_if(g_wd_ctemp, g_have ? temp : (wfail ? "n/a" : "..."));
     set_if(g_wd_cond, g_have ? cond : (wfail ? "Weather unavailable" : "Fetching..."));
     const char *l = simple_cfg_get_str("weather_loc", "");
     char loc[64]; snprintf(loc, sizeof loc, "%.60s", (l && l[0]) ? l : (have_fc && fc.loc[0] ? fc.loc : "Auto (by IP)"));
+    if(th_zune()) for(char *c = loc; *c; c++) if(*c >= 'a' && *c <= 'z') *c -= 32;
     set_if(g_wd_loc, loc);
     char hl[40] = "";
     if(have_fc && fc.ok) snprintf(hl, sizeof hl, "H %d\xC2\xB0  L %d\xC2\xB0", fc.hi, fc.lo);
@@ -581,6 +584,34 @@ void weather_app_create(lv_obj_t *root)
         lv_obj_align(g_wd_hint,LV_ALIGN_TOP_MID,0,134);
         simple_keep_label(g_wd_ctemp);simple_keep_label(g_wd_cicon);simple_keep_label(g_wd_loc);
         simple_keep_label(g_wd_cond);simple_keep_label(g_wd_hl);simple_keep_label(g_wd_hint);
+    }
+    if(th_zune()){                                                /* Figma 60: the next hours round the rim, now big in the middle */
+        LV_FONT_DECLARE(font_zune_light_88) LV_FONT_DECLARE(font_zune_regular_13) LV_FONT_DECLARE(font_zune_regular_14)
+        LV_FONT_DECLARE(font_zune_semibold_11) LV_FONT_DECLARE(font_zune_regular_12)
+        const lv_font_t *zune_font(const lv_font_t *base);
+        lv_obj_add_flag(ring, LV_OBJ_FLAG_HIDDEN);
+        for(int k = 0; k < WD_SLOTS; k++){
+            float a = (-90.0f + k * (360.0f / WD_SLOTS)) * 0.0174533f;
+            lv_obj_add_flag(g_wd_icon[k], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_style_text_font(g_wd_temp[k], zune_font(&font_zune_regular_13), 0);
+            lv_obj_set_style_text_color(g_wd_temp[k], k ? TC(TEXT_SECONDARY) : TC(ACCENT_PRIMARY), 0);
+            lv_obj_align(g_wd_temp[k], LV_ALIGN_CENTER, (int32_t)lroundf(150 * cosf(a)), (int32_t)lroundf(150 * sinf(a)));
+            lv_obj_add_flag(g_wd_hour[k], LV_OBJ_FLAG_HIDDEN);
+        }
+        lv_obj_align(g_wd_cicon, LV_ALIGN_TOP_MID, 0, 56);
+        lv_obj_set_style_text_font(g_wd_ctemp, zune_font(&font_zune_light_88), 0); lv_obj_set_style_text_color(g_wd_ctemp, TC(TEXT_PRIMARY), 0);
+        lv_obj_align(g_wd_ctemp, LV_ALIGN_TOP_MID, 8, 86);
+        lv_obj_set_style_text_font(g_wd_cond, zune_font(&font_zune_regular_14), 0); lv_obj_set_style_text_color(g_wd_cond, TC(TEXT_MUTED), 0);
+        lv_obj_set_width(g_wd_cond, 200); lv_obj_align(g_wd_cond, LV_ALIGN_TOP_MID, 0, 200);
+        lv_obj_set_style_text_font(g_wd_loc, &font_zune_semibold_11, 0); lv_obj_set_style_text_letter_space(g_wd_loc, 2, 0);
+        lv_obj_set_style_text_color(g_wd_loc, TC(TEXT_PRIMARY), 0); lv_obj_align(g_wd_loc, LV_ALIGN_TOP_MID, 0, 224);
+        lv_obj_set_style_text_font(g_wd_hl, zune_font(&font_zune_regular_12), 0); lv_obj_set_style_text_color(g_wd_hl, TC(TEXT_MUTED), 0);
+        lv_obj_align(g_wd_hl, LV_ALIGN_TOP_MID, 0, 244);
+        lv_obj_set_style_text_font(g_wd_hint, zune_font(&font_zune_regular_12), 0); lv_obj_set_style_text_color(g_wd_hint, TC(TEXT_MUTED), 0);
+        lv_obj_align(g_wd_hint, LV_ALIGN_TOP_MID, 0, 262);
+        lv_obj_t *ks[] = { g_wd_cicon, g_wd_ctemp, g_wd_cond, g_wd_loc, g_wd_hl, g_wd_hint };
+        for(unsigned k = 0; k < sizeof ks / sizeof ks[0]; k++) kit_keep(ks[k]);
+        for(int k = 0; k < WD_SLOTS; k++){ kit_keep(g_wd_temp[k]); kit_keep(g_wd_hour[k]); }
     }
     if(th_braun()){                                               /* Braun: the grille, a panel under the dial, dark type */
         br_face(root); lv_obj_t *pd = br_disc(root, 180, 180, 104, BR_PANEL); lv_obj_move_to_index(pd, 1);
