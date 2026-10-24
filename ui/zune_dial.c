@@ -57,7 +57,11 @@ static void layout(void){
         for(int k = 0; k < 3; k++) zg_hide(part[k], off);
         if(off) continue;
         int s = d < ZD_PITCH / 2 ? 0 : d < ZD_PITCH * 3 / 2 ? 1 : 2;
-        if(s != Z.size[i]){ Z.size[i] = s; lv_obj_set_style_text_font(Z.lbl[i], step_font(s), 0); }
+        if(s != Z.size[i]){                                 /* (from upstream 3.0) a long name steps down a size rather than run off the glass */
+            Z.size[i] = s; int face = s; lv_point_t ts;
+            while(face < 2){ lv_text_get_size(&ts, lv_label_get_text(Z.lbl[i]), step_font(face), 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE); if(ts.x <= 286) break; face++; }
+            lv_obj_set_style_text_font(Z.lbl[i], step_font(face), 0);
+        }
         float o = 1.0f - (float)d / ZD_PITCH * 0.4f; if(o < 0.3f) o = 0.3f;
         zg_opa(Z.lbl[i], (lv_opa_t)(o * 255));
         int x = edge_x(yc);

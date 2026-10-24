@@ -909,7 +909,7 @@ static lv_obj_t *cyc_row(lv_obj_t *parent, int y, const char *label,
 
     lv_obj_t *val = lv_label_create(row);
     lv_label_set_text(val, cur);
-    lv_obj_set_size(val,190,30);lv_label_set_long_mode(val,LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_size(val,190,LV_SIZE_CONTENT);lv_label_set_long_mode(val,LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_set_style_text_align(val,LV_TEXT_ALIGN_CENTER,0);lv_obj_align(val, LV_ALIGN_TOP_MID, 0, 26);
     lv_obj_set_style_text_font(val, TF(UI_20), 0);
     lv_obj_set_style_text_color(val, TC(ACCENT_PRIMARY), 0);

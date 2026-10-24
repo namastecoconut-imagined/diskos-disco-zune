@@ -77,6 +77,7 @@ static int g_dock_on, g_dock_dim;   /* zune45 desk clock: active (on the charger
 static int dock_level(void){ int b = ui_effective_brightness(); int d = simple_cfg_get_int("zdock_bri", 4); return b < d ? (b < 1 ? 1 : b) : d; }
 void zsaver_set_dock(int on);
 static unsigned g_bright_gen;       /* zune47: the player generation whose brightness reset was already undone */
+int ui_volume_overlay_visible(void);   /* ui.c */
 static double g_up0;                /* zune49: seconds since power-on when main() began */
 static uint32_t g_ztap_at;          /* Zune lock screen: a tap waiting to unlock */
 static uint32_t g_zunlock_at;       /* the lock screen was just tapped away: LVGL stays deaf a moment */
@@ -482,6 +483,7 @@ void ui_route_forget(const char *why){
     ui_bt_codec_upgrade_cancel(); ui_route_hold_cancel(); ui_resume_guard_cancel();
 }
 int ui_route_bt(const char *mac){
+    if(modes_output_route() == OUT_USB) return -1;      /* (upstream 3.0) leave USB-C through the guarded switch back to the jack first */
     if(modes_output_busy()) return -1;                  /* an output switch is in flight or recovering: the auto-route poll retries */
     if(!ui_local_playback_allowed()) return -1;
     if(ui_get_source_mode() != 0) return -1;            /* B02: only while the source is Playback (not USB DAC, receiving...) */
@@ -717,6 +719,7 @@ static void storage_unknown(const char *why){
 int ui_set_source_mode(int mode){
     if(modes_output_busy()){ ui_toast("Switching output - try again"); return -1; }
     if(mode < 0 || mode > 5) return -1;                 /* 0 Playback, 1 USB DAC, 2 BT DAC, 3 USB storage, 4 BT streaming, 5 AirPlay */
+    if(modes_output_route() == OUT_USB && mode != 0){ ui_toast(th_zune() ? "switch back from usb-c audio first" : "Return to the headphone output before changing USB mode"); return -1; }   /* (upstream 3.0) */
     if(mode != 5) ma_mode_leaving();                    /* MA Sendspin rides on AirPlay: another mode turns it off */
     if(ui_source_switch_pending()){ ui_toast("Storage is switching"); return -1; }
     if(g_sd_phase == SD_UNKNOWN || g_sd_hold || !sd_io_healthy()){ ui_toast("SD access is held this boot"); return -1; }
@@ -3072,7 +3075,7 @@ void ui_art_set_pending(int pending){
  * following it; once the swipe has gone far enough to count it fills with the accent. Hidden on release. */
 static lv_obj_t *g_bh, *g_bh_lbl;
 static int g_hint_late;                                      /* the swipe has taken too long to count (700 ms) */
-static void back_hint_at(int y, int dx, int mirrored){
+static void back_hint_at(int y, int dx, int mirrored, int late){
     int thresh = g_swipe_thresh;
     if(dx <= 6){ if(g_bh) lv_obj_add_flag(g_bh, LV_OBJ_FLAG_HIDDEN); return; }
     if(!g_bh){
@@ -3085,7 +3088,7 @@ static void back_hint_at(int y, int dx, int mirrored){
         lv_obj_align(g_bh_lbl, mirrored ? LV_ALIGN_LEFT_MID : LV_ALIGN_RIGHT_MID, mirrored ? 12 : -12, 0);
     }
     lv_obj_align(g_bh_lbl, mirrored ? LV_ALIGN_LEFT_MID : LV_ALIGN_RIGHT_MID, mirrored ? 12 : -12, 0);
-    int armed = dx >= thresh && !g_hint_late;
+    int armed = dx >= thresh && !late;
     int reach = dx > thresh * 3 / 2 ? thresh * 3 / 2 : dx;              /* slides in with the finger, then stops */
     if(y < 70) y = 70;
     if(y > 290) y = 290;
@@ -3100,8 +3103,8 @@ static void back_hint_at(int y, int dx, int mirrored){
         lv_obj_set_style_transform_scale(g_bh, armed ? 272 : 256, 0);
     }
 }
-void ui_back_hint(int y,int dx){back_hint_at(y,dx,disco_mirror());}
-void ui_back_hint_left(int y,int dx){back_hint_at(y,dx,0);}
+void ui_back_hint(int y,int dx){back_hint_at(y,dx,disco_mirror(),g_hint_late);}
+void ui_back_hint_left(int y,int dx){back_hint_at(y,dx,0,0);}   /* (upstream 3.0) the left hint has its own timing: never 'late' from the main swipe */
 /* Shortcuts uses the Back feedback from the opposite edge, with its own glyph. */
 static lv_obj_t *g_sh, *g_sh_lbl;
 void ui_shortcuts_hint(int y, int dx){
@@ -3676,7 +3679,7 @@ int main(int argc, char **argv){
                     s_press_scr=screen_current();   /* a gesture belongs to the screen it STARTED on */
                     cover_tap = 0;
                     fsart_touch = ui_np_fsart_active();   /* latch: overlay owns this whole gesture */
-                    sleep_touch = ui_np_overlay_active() || azjump_owns_point(p.x,p.y)   /* latch: the sleep popover owns this whole gesture, */
+                    sleep_touch = ui_volume_overlay_visible() || ui_np_overlay_active() || azjump_owns_point(p.x,p.y)   /* latch: the sleep popover owns this whole gesture, */
                                || (screen_current()==SCR_EQ_EDITOR && eqcustom_owns_point(p.x, p.y));   /* and so does the EQ dial (fork) */
                     seek_touch = dhome_owns_point(p.x, p.y) || simple_owns_point(p.x,p.y);
                     if(th_null() && null_owns_point(p.x,p.y))sleep_touch=1;   /* fork: Disco Music's seek line / ring (no swipe to Apps) */

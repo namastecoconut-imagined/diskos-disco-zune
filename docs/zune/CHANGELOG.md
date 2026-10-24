@@ -2,6 +2,22 @@
 
 Changes to the Zune theme for diskOS Disco! on the FiiO Snowsky Disc. The newest update is at the top.
 
+## Update 3 (October 2026)
+
+Functional fixes brought over from zmd22's diskOS Disco! 3.0 work. Thanks, zmd22. The look of the theme is unchanged.
+
+- **Bluetooth codecs.** Headphones connect on the codec you chose from the start, and the Disc remembers which codecs each pair really supports. After a real disconnect, the next connection starts clean. A "Connected: headphones / codec" note appears once the codec has settled, including on automatic reconnects.
+- **Bluetooth screen.** It now updates when headphones connect or disconnect while it's open, so it no longer shows a stale "Connected – LDAC".
+- **Safer USB-C output.** After switching, the Disc waits until a DAC that can actually play has appeared and gone quiet, then connects to it and resumes. If none appears within 8 s, it returns to the headphone jack. Recovery never re-routes while audio is still playing. Bluetooth can't take over while on USB-C, and other working modes ask you to leave USB-C first.
+- **Volume overlay.** It takes the touch while it's open, so turning the volume can't seek the song or press anything underneath. It stays up while your finger is on it, and a tap closes it.
+- **Dialogs.** Long titles shrink to fit and long text scrolls.
+- **Long list names** in dial lists step down a size instead of running off the glass.
+- **Small fixes.**
+  - Leaving Immersive mid-animation no longer leaves the disc settling.
+  - The back-swipe arrow from the left edge no longer shows "too late" by mistake.
+  - Scrolling labels in Listening Stats and Tune are no longer clipped.
+  - The lock screen's progress bar stops updating while the screen is dark.
+
 ## Update 2 (October 2026)
 
 This is everything since the first release of the theme.

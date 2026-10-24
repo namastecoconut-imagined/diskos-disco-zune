@@ -17,6 +17,7 @@
 #include <unistd.h>
 #include <glob.h>
 #include <math.h>
+#include <ctype.h>
 
 /* Working Mode (audio source) picker - mirrors stock's "Working mode" list. Tapping a mode replays
  * the captured V2.28 switch sequence via ui_set_source_mode() and marks it selected.
@@ -72,8 +73,9 @@ static const out_seq_t OUT_SEQ[3] = {
 static void modes_ui_refresh(void);
 static int g_out_route = OUT_INTERNAL;
 static unsigned g_out_gen = 0;
-static struct { int target, was_playing, full; unsigned gen; char path[256]; long pos; uint32_t t0, quiet0; lv_timer_t *tm; } g_osw;
-static int g_rec = 0; static unsigned g_rec_gen = 0; static lv_timer_t *g_rec_tm = NULL;
+static struct { int target, was_playing, full, usb_wait; unsigned gen; char path[256]; long pos; uint32_t t0, quiet0; lv_timer_t *tm; } g_osw;
+static int g_rec = 0; static unsigned g_rec_gen = 0; static uint32_t g_rec_quiet0; static lv_timer_t *g_rec_tm = NULL;
+static void osw_tick(lv_timer_t *t);
 
 /* the route a switch really landed on, remembered across a restart (modes_boot_check): only where a switch lands -
  * the "a new player is on the internal DAC" resets at start must not wipe it before the boot check reads it */
@@ -101,14 +103,18 @@ int modes_local_init(int with_gadget){
 }
 /* 1 only when every playback PCM node is readable and none is RUNNING or DRAINING; unreadable / no nodes = not proven */
 static int out_pcm_quiet(void){
-    glob_t g; int quiet = 1;
-    if(glob(OUT_PCM_GLOB, 0, NULL, &g) != 0) return 0;
+    glob_t g = {0}; int quiet = 1;
+    if(glob(OUT_PCM_GLOB, 0, NULL, &g) != 0){ globfree(&g); return 0; }
     for(size_t i = 0; i < g.gl_pathc && quiet; i++){
         FILE *f = fopen(g.gl_pathv[i], "r"); char l[96] = "";
         if(!f){ quiet = 0; break; }
         if(!fgets(l, sizeof l, f)) l[0] = 0;
         fclose(f);
-        if(!l[0] || strstr(l, "RUNNING") || strstr(l, "DRAINING")) quiet = 0;
+        /* (from upstream 3.0) only states known to be silent count: anything unreadable or unrecognised is "not proven" */
+        l[strcspn(l, "\r\n")] = 0;
+        static const char *const safe[] = { "closed", "state: OPEN", "state: SETUP", "state: PREPARED", "state: XRUN", "state: PAUSED", "state: SUSPENDED", "state: DISCONNECTED" };
+        int known = 0; for(unsigned k = 0; k < sizeof safe / sizeof *safe; k++) if(!strcmp(l, safe[k])) known = 1;
+        if(!known) quiet = 0;
     }
     globfree(&g);
     return quiet;
@@ -123,6 +129,27 @@ static int out_usb_card_ok(void){            /* any USB audio card: a usbid node
     char l[256]; while(!ok && fgets(l, sizeof l, f)) ok = strstr(l, "USB-Audio") != NULL || strstr(l, "USB Audio") != NULL;
     fclose(f); return ok;
 }
+/* (from upstream 3.0) a USB audio card that can actually PLAY: a well-formed usbid and a playback PCM on that card -
+ * a USB microphone, a stale directory or a half-enumerated device is not proof the route has a sink */
+static int out_usb_play_ok(void){
+    glob_t g = {0}; int ok = 0;
+    if(glob("/proc/asound/card*/usbid", 0, NULL, &g) == 0){
+        for(size_t i = 0; i < g.gl_pathc && !ok; i++){
+            char id[32] = "", dir[256], pat[300];
+            FILE *f = fopen(g.gl_pathv[i], "r"); if(!f) continue;
+            int rd = fgets(id, sizeof id, f) != NULL; fclose(f); if(!rd) continue;
+            id[strcspn(id, "\r\n")] = 0;
+            if(strlen(id) != 9 || id[4] != ':') continue;
+            int hex = 1; for(int k = 0; k < 9; k++) if(k != 4 && !isxdigit((unsigned char)id[k])) hex = 0;
+            if(!hex) continue;
+            snprintf(dir, sizeof dir, "%s", g.gl_pathv[i]); char *sl = strrchr(dir, '/'); if(sl) *sl = 0;
+            snprintf(pat, sizeof pat, "%s/pcm*p/sub*/status", dir);
+            glob_t p = {0}; if(glob(pat, 0, NULL, &p) == 0) ok = p.gl_pathc > 0; globfree(&p);
+        }
+    }
+    globfree(&g);
+    return ok;
+}
 /* 0 = whole sequence sent; -1 = the 0666 was refused (nothing changed); -2 = the route moved but the tail failed */
 static int out_seq_send(int t, int full){
     if(ipc_send_cmd(OUT_SEQ[t].route) < 0) return -1;
@@ -134,53 +161,49 @@ static int out_seq_send(int t, int full){
     return 0;
 }
 /* recovery-pending: retry the full internal sequence until it lands on the same live player connection */
-static void out_rec_clear(void){ if(g_rec_tm){ lv_timer_del(g_rec_tm); g_rec_tm = NULL; } g_rec = 0; }
+static void out_rec_clear(void){ if(g_rec_tm){ lv_timer_del(g_rec_tm); g_rec_tm = NULL; } g_rec = 0; g_rec_quiet0 = 0; }
+static void out_resume(int moved);
 static void out_recover_tick(lv_timer_t *t){
     (void)t;
     if(ipc_generation() != g_rec_gen){ out_rec_clear(); out_set_state(OUT_INTERNAL); modes_ui_refresh(); return; }   /* a new player initialises itself */
-    if(!ipc_is_ready()) return;
+    /* (from upstream 3.0) re-route only once the PCM has been proven quiet for OUT_QUIET_MS: never into a live stream */
+    if(!ipc_is_ready() || ui_is_playing() || !out_pcm_quiet()){ g_rec_quiet0 = 0; return; }
+    if(!g_rec_quiet0){ g_rec_quiet0 = lv_tick_get() ? lv_tick_get() : 1; return; }
+    if(lv_tick_elaps(g_rec_quiet0) < OUT_QUIET_MS) return;
+    g_rec_quiet0 = 0;
     if(out_seq_send(OUT_INTERNAL, 1) == 0){
         out_rec_clear(); out_set_state(OUT_INTERNAL); out_remember(OUT_INTERNAL);
-        ui_toast("Internal DAC restored"); modes_ui_refresh();
+        ui_toast("Internal DAC restored"); out_resume(1); modes_ui_refresh();
     }
 }
 static void out_rec_enter(void){
-    out_set_state(OUT_INTERNAL);
+    /* (upstream 3.0) keep the last confirmed route: busy / recovering stays explicit until the restore really lands */
     if(g_rec) return;
-    g_rec = 1; g_rec_gen = ipc_generation();
+    g_rec = 1; g_rec_gen = ipc_generation(); g_rec_quiet0 = 0;
     g_rec_tm = lv_timer_create(out_recover_tick, 500, NULL);
 }
 /* resume only the same track, and only if the seek and the play toggle were accepted */
 static void out_resume(int moved){
     if(!g_osw.was_playing) return;
     track_state_t st; ipc_get_state(&st);
-    if(moved && (ipc_generation() != g_osw.gen || !st.have_track || strcmp(st.path, g_osw.path) != 0)){ ui_toast("Output switched - press play"); return; }
+    if(ipc_generation() != g_osw.gen || !st.have_track || strcmp(st.path, g_osw.path) != 0){ ui_toast("Output switched - press play"); return; }
     if(moved && g_osw.pos > 0 && ui_seek_to(g_osw.pos) < 0){ ui_toast("Couldn't resume - press play"); return; }
-    if(ipc_send_cmd(OUT_PAUSE) < 0) ui_toast("Couldn't resume - press play");   /* toggle: plays again */
+    if(!ui_is_playing() && ipc_send_cmd(OUT_PAUSE) < 0) ui_toast("Couldn't resume - press play");   /* toggle: plays again (never pauses a song already going) */
 }
-/* after a switch to USB audio: wait for the DAC to enumerate on the new host port and say what was found */
 static void out_usb_name(char *out, size_t cap);
-static lv_timer_t *g_uw; static uint32_t g_uw_t0;
-static void out_usb_watch_tick(lv_timer_t *t){
-    (void)t;
-    if(modes_output_route() != OUT_USB){ lv_timer_del(g_uw); g_uw = NULL; return; }
-    if(out_usb_card_ok()){
-        lv_timer_del(g_uw); g_uw = NULL;
-        char n[96], b[140]; out_usb_name(n, sizeof n);
-        snprintf(b, sizeof b, th_zune() ? "playing through usb-c \xC2\xB7 %s" : "USB audio - %s", n[0] ? n : "usb audio device");
-        ui_toast(b); return;
-    }
-    if(lv_tick_elaps(g_uw_t0) > 8000){
-        lv_timer_del(g_uw); g_uw = NULL;
-        ui_toast(th_zune() ? "no usb-c audio found \xC2\xB7 check the cable or adapter" : "No USB audio device found - check the cable");
-    }
-}
-static void out_usb_watch(void){ if(g_uw) lv_timer_del(g_uw); g_uw_t0 = lv_tick_get(); g_uw = lv_timer_create(out_usb_watch_tick, 500, NULL); }
 static int out_run(void){
     int target = g_osw.target;
     int rc = out_seq_send(target, g_osw.full);
     if(rc == -1){ out_set_state(modes_output_route()); ui_toast("Couldn't switch output"); out_resume(0); modes_ui_refresh(); return -1; }
-    if(rc == 0){ out_set_state(target); out_remember(target); out_resume(1); modes_ui_refresh(); if(target == OUT_USB) out_usb_watch(); return 0; }
+    if(rc == 0){
+        if(target == OUT_USB){
+            /* (from upstream 3.0) host mode has to be asked for before the DAC can enumerate: don't resume or call USB
+             * active until a playable USB card has been there, quiet, for OUT_QUIET_MS; then bind it and resume */
+            g_osw.usb_wait = 1; g_osw.t0 = lv_tick_get(); g_osw.quiet0 = 0;
+            g_osw.tm = lv_timer_create(osw_tick, 100, NULL); modes_ui_refresh(); return 0;
+        }
+        out_set_state(target); out_remember(target); out_resume(1); modes_ui_refresh(); return 0;
+    }
     /* the route moved but the tail failed: back to the internal DAC; never end without 0657 8 landing */
     if(out_seq_send(OUT_INTERNAL, 1) == 0){
         out_set_state(OUT_INTERNAL); out_remember(OUT_INTERNAL);
@@ -203,6 +226,30 @@ static void osw_stop(const char *why, int resume){
 static void osw_tick(lv_timer_t *t){
     (void)t;
     track_state_t st; ipc_get_state(&st);
+    if(g_osw.usb_wait){                                   /* after 0666 3 / 0642 5: waiting for the DAC to enumerate */
+        if(ipc_generation() != g_osw.gen){ osw_stop("Player restarted - try again", 0); return; }
+        if(lv_tick_elaps(g_osw.t0) >= 8000){
+            lv_timer_del(g_osw.tm); g_osw.tm = NULL;
+            out_rec_enter();                              /* the restore proves silence again before it re-routes */
+            ui_toast(th_zune() ? "no usb-c audio found \xC2\xB7 back to the headphone jack" : "USB audio not ready - restoring headphones");
+            modes_ui_refresh(); return;
+        }
+        if(!out_usb_play_ok() || !out_pcm_quiet()){ g_osw.quiet0 = 0; return; }
+        if(!g_osw.quiet0){ g_osw.quiet0 = lv_tick_get() ? lv_tick_get() : 1; return; }
+        if(lv_tick_elaps(g_osw.quiet0) < OUT_QUIET_MS) return;
+        lv_timer_del(g_osw.tm); g_osw.tm = NULL;
+        /* the first 0666 may have bound the player's silent USB_HOST_NULL sink before the DAC existed: rebind to the
+         * real card (route + work mode, without asking for the host port again), then resume */
+        if(out_seq_send(OUT_USB, 0) != 0){
+            if(out_seq_send(OUT_INTERNAL, 1) == 0){ out_set_state(OUT_INTERNAL); out_remember(OUT_INTERNAL); ui_toast("USB audio failed - headphones restored"); out_resume(1); }
+            else { out_rec_enter(); ui_toast("USB audio failed - recovering output"); }
+            modes_ui_refresh(); return;
+        }
+        out_set_state(OUT_USB); out_remember(OUT_USB);
+        { char n[96], b[140]; out_usb_name(n, sizeof n);
+          snprintf(b, sizeof b, th_zune() ? "playing through usb-c \xC2\xB7 %s" : "USB audio - %s", n[0] ? n : "usb audio device"); ui_toast(b); }
+        out_resume(1); modes_ui_refresh(); return;
+    }
     if(ipc_generation() != g_osw.gen){ osw_stop("Player restarted - try again", 0); return; }
     if(strcmp(st.path, g_osw.path) != 0){ osw_stop("Track changed - try again", 0); return; }
     if(lv_tick_elaps(g_osw.t0) >= OUT_WAIT_MS){ osw_stop("Player is busy - try again", 0); return; }   /* deadline first: a late tick never routes, even with the hold complete */
@@ -214,7 +261,7 @@ static void osw_tick(lv_timer_t *t){
     const char *why = ui_output_blocked();
     if(why){ osw_stop(why, g_osw.was_playing); return; }
     /* no USB-card check here: the port stays a USB device (the PC-DAC gadget) until 0642 5 asks for host mode, so an
-     * attached DAC can only enumerate AFTER the switch. Stock sends the frames blind; out_usb_watch() reports after. */
+     * attached DAC can only enumerate AFTER the switch. Stock sends the frames blind; the usb_wait step in osw_tick then waits for the card. */
     lv_timer_del(g_osw.tm); g_osw.tm = NULL;
     out_run();
 }

@@ -14,6 +14,8 @@ there. You can switch between Zune and the other themes at any time.
 
 ## What's new
 
+**Update 3 (October 2026):** Bluetooth codec, USB-C output and touch fixes from zmd22's Disco! 3.0 work.
+
 **Update 2 (October 2026):**
 - A typographic Now Playing, with an Immersive view (swipe up).
 - Quickplay, and a Metro lock screen with a desk clock while charging.

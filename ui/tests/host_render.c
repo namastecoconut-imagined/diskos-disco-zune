@@ -2149,6 +2149,7 @@ render:
     lv_refr_now(d);
     if(th_simple()&&getenv("SQUASH_VOLUME")){ui_show_volume(atoi(getenv("SQUASH_VOLUME")));nav_wait(180);lv_refr_now(d);}
     if(getenv("VOLUME_CONCEPT")){volume_concept(atoi(getenv("VOLUME_CONCEPT")));lv_refr_now(d);}
+    if(getenv("TOAST")){ui_toast(getenv("TOAST"));nav_wait(400);lv_refr_now(d);}   /* a pop-up on any screen, for checking its fit */
     FILE *f=fopen(argv[5],"wb"); if(!f) return 1;
     fprintf(f,"P6\n360 360\n255\n");
     for(size_t i=0;i<sizeof pixels;i+=3){

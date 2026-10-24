@@ -266,7 +266,7 @@ static void cb_close(lv_event_t *e){ if(lv_event_get_code(e) == LV_EVENT_CLICKED
 
 /* Zune: these dialogs take the whole glass (black, the title in Light, lower case) and their buttons become the
  * split cap along the bottom, as in the confirm screen (Figma 07): left grey, right (or a lone one) in the accent */
-LV_FONT_DECLARE(font_zune_light_32) LV_FONT_DECLARE(font_zune_regular_14) LV_FONT_DECLARE(font_zune_regular_17)
+LV_FONT_DECLARE(font_zune_light_24) LV_FONT_DECLARE(font_zune_light_28) LV_FONT_DECLARE(font_zune_light_32) LV_FONT_DECLARE(font_zune_regular_14) LV_FONT_DECLARE(font_zune_regular_16) LV_FONT_DECLARE(font_zune_regular_17)
 const lv_font_t *zune_font(const lv_font_t *base);
 static void zlow(char *o, size_t n, const char *s){ size_t i = 0; for(; s[i] && i + 1 < n; i++) o[i] = (s[i] >= 'A' && s[i] <= 'Z') ? s[i] + 32 : s[i]; o[i] = 0; }
 static lv_obj_t *modal_card(const char *title, int h){
@@ -281,8 +281,10 @@ static lv_obj_t *modal_card(const char *title, int h){
         lv_obj_set_size(card, 360, 360); lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
         char lt[80]; zlow(lt, sizeof lt, tr(title));
         lv_obj_t *t = lv_label_create(card); kit_keep(t); lv_label_set_text(t, lt);
-        lv_label_set_long_mode(t, LV_LABEL_LONG_WRAP); lv_obj_set_width(t, 280); lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_style_text_font(t, zune_font(&font_zune_light_32), 0); lv_obj_set_style_text_color(t, TC(TEXT_PRIMARY), 0);
+        const lv_font_t*faces[]={&font_zune_light_32,&font_zune_light_28,&font_zune_light_24};const lv_font_t*f=zune_font(faces[2]);
+        for(int i=0;i<3;i++){lv_point_t sz;lv_text_get_size(&sz,lt,zune_font(faces[i]),0,0,LV_COORD_MAX,LV_TEXT_FLAG_NONE);if(sz.x<=280){f=zune_font(faces[i]);break;}}
+        lv_label_set_long_mode(t, LV_LABEL_LONG_DOT);lv_obj_set_size(t,280,lv_font_get_line_height(f));lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_font(t, f, 0); lv_obj_set_style_text_color(t, TC(TEXT_PRIMARY), 0);
         lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 62);
         return card;
     }
@@ -309,12 +311,18 @@ static lv_obj_t *modal_card(const char *title, int h){
 }
 static lv_obj_t *modal_text(lv_obj_t *card, const char *txt, int y, theme_color_role_t col){
     if(th_zune()){
-        lv_obj_t *s = lv_label_create(card); kit_keep(s); lv_label_set_text(s, txt);
+        /* Title, readable body viewport, and footer own disjoint vertical bands. */
+        lv_obj_t *title=lv_obj_get_child(card,0);lv_obj_update_layout(title);
+        int top=lv_obj_get_y(title)+lv_obj_get_height(title)+12;
+        lv_obj_t *area=lv_obj_create(card);lv_obj_remove_style_all(area);kit_keep(area);
+        lv_obj_set_pos(area,46,top);lv_obj_set_size(area,268,y==40?48:244-top);
+        lv_obj_set_scroll_dir(area,LV_DIR_VER);lv_obj_set_scrollbar_mode(area,LV_SCROLLBAR_MODE_AUTO);
+        lv_obj_t *s = lv_label_create(area); kit_keep(s); lv_label_set_text(s, txt);
         lv_label_set_long_mode(s, LV_LABEL_LONG_WRAP); lv_obj_set_width(s, 260);
         lv_obj_set_style_text_align(s, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_font(s, zune_font(&font_zune_regular_14), 0);
         lv_obj_set_style_text_color(s, col == THEME_CLR_TEXT_MUTED ? TC(TEXT_MUTED) : theme_color(col), 0);
-        lv_obj_align(s, LV_ALIGN_TOP_MID, 0, y + 70);
+        lv_obj_align(s, LV_ALIGN_TOP_MID, 0, 0);
         return s;
     }
     lv_obj_t *s = lv_label_create(card);
@@ -387,7 +395,7 @@ void system_about_open(int v){
     lv_obj_set_style_pad_row(list, 6, 0);
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_OFF);
-    if(th_zune()){ lv_obj_set_size(list, 260, rb ? 110 : 136); lv_obj_align(list, LV_ALIGN_TOP_MID, 0, rb ? 140 : 112); lv_obj_set_style_pad_row(list, 2, 0); }
+    if(th_zune()){ lv_obj_set_size(list, 260, rb ? 60 : 136); lv_obj_align(list, LV_ALIGN_TOP_MID, 0, rb ? 188 : 112); lv_obj_set_style_pad_row(list, 2, 0); }
     for(int i = 0; i < n; i++){
         if(th_zune()){                                            /* Figma 58: the value large, its name small under it */
             lv_obj_t *v = lv_label_create(list); kit_keep(v); lv_label_set_text(v, rows[i].value);
@@ -498,16 +506,24 @@ static void cb_sd_go(lv_event_t *e){
     modal_pill(c, 0, "Cancel", THEME_CLR_TEXT_SECONDARY, cb_dl_cancel, "system.sd_cancel");
     g_dl_tm = lv_timer_create(dl_tick, 200, NULL);
 }
+static void sd_confirmation(void){
+    lv_obj_t *c = modal_card(th_zune()?"update from SD":"Update from SD Card", 220);
+    modal_text(c, th_zune()?"Verify and stage the SD update? It installs after restart. If it fails, the previous version is restored.":"Found a diskOS update on the SD card. Verify and stage it? It is installed at the next restart and rolled back automatically if it doesn't work.", 46, THEME_CLR_TEXT_MUTED);
+    modal_pill(c, -58, "Cancel", THEME_CLR_TEXT_SECONDARY, cb_close, "system.sd_later");
+    modal_pill(c,  58, "Update", THEME_CLR_ACCENT_EMPHASIS, cb_sd_go, "system.sd_go");
+}
+void system_preview_confirmation(int kind){
+    if(kind==0)sd_confirmation();
+    else if(kind==1)modal_simple("Update from SD Card","Found a diskOS update, but this install has no update key. Flash diskOS once with your key (diskos-root.pub.pem in the installer's payload folder).");
+    else modal_simple("Update verification failed","The update could not be verified. The installed firmware has not changed. Check the update files and try again. If the problem continues, copy a fresh update to the SD card before retrying. Keep the player charged while preparing the update. Make sure the complete archive was copied and safely eject the card before restarting the player.");
+}
 void system_update_sd_open(int v){
     (void)v;
     char m[220]; snprintf(m, sizeof m, "%s/" SD_UPDATE_DIR "/update.manifest", SYS_DEV_PATHS.sd_root);
     if(!sys_is_mounted(SYS_DEV_PATHS.mounts, SYS_DEV_PATHS.sd_root) || access(m, R_OK) != 0){ sd_stock_update_info(); return; }
     if(!ota_supported(&OTA_DEV)){ modal_simple("Update from SD Card", "Found a diskOS update, but this install has no update key. Flash diskOS once with your key (diskos-root.pub.pem in the installer's payload folder)."); return; }
     if(atomic_load(&g_dl.state) != 0){ ui_toast("Already updating"); return; }
-    lv_obj_t *c = modal_card("Update from SD Card", 220);
-    modal_text(c, "Found a diskOS update on the SD card. Verify and stage it? It is installed at the next restart and rolled back automatically if it doesn't work.", 46, THEME_CLR_TEXT_MUTED);
-    modal_pill(c, -58, "Cancel", THEME_CLR_TEXT_SECONDARY, cb_close, "system.sd_later");
-    modal_pill(c,  58, "Update", THEME_CLR_ACCENT_EMPHASIS, cb_sd_go, "system.sd_go");
+    sd_confirmation();
 }
 static void chk_tick(lv_timer_t *t){
     int st = atomic_load_explicit(&g_chk.state, memory_order_acquire);

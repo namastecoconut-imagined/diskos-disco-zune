@@ -56,13 +56,16 @@ static void fmt_ms(char *b, size_t n, long ms){ long s = ms / 1000; if(s < 0) s 
     if(s >= 3600) snprintf(b, n, "%ld:%02ld:%02ld", s / 3600, s / 60 % 60, s % 60); else snprintf(b, n, "%ld:%02ld", s / 60, s % 60); }
 static void zprog_tick(lv_timer_t *t){
     (void)t;
-    if(!Z.root || !Z.ptrack || Z.have <= 0 || (t && screen_current() != SCR_SAVER)) return;
+    int ui_display_is_off(void);
+    if(!Z.root || !Z.ptrack || Z.have <= 0 || (t && (screen_current() != SCR_SAVER || ui_display_is_off()))) return;   /* (upstream 3.0) no work for a dark glass */
     track_state_t st; ipc_get_state(&st);
     long dur = st.duration_ms, pos = st.position_ms; if(pos > dur && dur > 0) pos = dur;
     char a[16], b[16], l[40]; fmt_ms(a, sizeof a, pos); fmt_ms(b, sizeof b, dur);
     if(dur > 0) snprintf(l, sizeof l, "%s / %s", a, b); else snprintf(l, sizeof l, "%s", a);
-    lv_label_set_text(Z.ptime, st.have_track ? l : "");
-    lv_obj_set_width(Z.pfill, dur > 0 ? (int)((long)ZS_TW * pos / dur) : 0);
+    const char *tx = st.have_track ? l : "";
+    if(strcmp(lv_label_get_text(Z.ptime), tx)) lv_label_set_text(Z.ptime, tx);              /* (upstream 3.0) only redraw what changed */
+    int w = dur > 0 ? (int)((long long)ZS_TW * pos / dur) : 0; if(w < 0) w = 0; if(w > ZS_TW) w = ZS_TW;
+    if(lv_obj_get_style_width(Z.pfill, 0) != w) lv_obj_set_width(Z.pfill, w);
 }
 void zsaver_create(lv_obj_t *root){
     memset(&Z, 0, sizeof Z);
