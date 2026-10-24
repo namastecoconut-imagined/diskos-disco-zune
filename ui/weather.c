@@ -386,6 +386,8 @@ static void weather_app_refresh(void)
     time_t now = time(NULL); struct tm lt; localtime_r(&now, &lt);
     int now_abs = lt.tm_hour * 60 + lt.tm_min, first = -1;
     if(have_fc && fc.ok){ for(int i = 0; i < fc.n; i++) if(fc.s[i].day * 1440 + fc.s[i].hour * 60 > now_abs){ first = i; break; } }
+    /* Zune: the top of the ring is NOW (the 3-hour slot the clock is in, accent), the rest follow round the rim */
+    if(th_zune() && first > 0) first--;
     for(int k = 0; k < WD_SLOTS; k++){
         int i = first >= 0 ? first + k : -1;
         if(th_simple() && k<4 && g_wd_pill[k]){
@@ -397,7 +399,9 @@ static void weather_app_refresh(void)
         const char *ic = wd_icon(fc.s[i].code, night);
         set_if(g_wd_icon[k], ic); lv_obj_set_style_text_color(g_wd_icon[k], wd_col(ic), 0);
         char b[16]; snprintf(b, sizeof b, "%d\xC2\xB0", fc.s[i].t); set_if(g_wd_temp[k], b);
-        snprintf(b, sizeof b, th_disco_family() ? "%02d:00" : "%02d", fc.s[i].hour); set_if(g_wd_hour[k], b);
+        if(th_zune() && k == 0 && fc.s[i].day * 1440 + fc.s[i].hour * 60 <= now_abs) snprintf(b, sizeof b, "now");
+        else snprintf(b, sizeof b, th_disco_family() ? "%02d:00" : "%02d", fc.s[i].hour);
+        set_if(g_wd_hour[k], b);
     }
     set_if(g_wd_hint, (have_fc && fc.ok) ? "" : (fc_state ? "Loading forecast..." : "Forecast unavailable"));
 }
@@ -409,7 +413,7 @@ void weather_demo(void){
     static const int CODE[10] = { 113, 116, 116, 119, 176, 176, 113, 113, 116, 119 }, T[10] = { 18, 19, 17, 15, 14, 13, 12, 12, 14, 16 };
     pthread_mutex_lock(&g_fc_mu);
     memset(&g_fc, 0, sizeof g_fc); g_fc.ok = 1; g_fc.hi = 21; g_fc.lo = 11; g_fc.n = 10;
-    for(int i = 0; i < 10; i++){ int h = (lt.tm_hour / 3 + 1 + i) * 3; g_fc.s[i].day = h / 24; g_fc.s[i].hour = h % 24; g_fc.s[i].t = T[i]; g_fc.s[i].code = CODE[i]; }
+    for(int i = 0; i < 10; i++){ int h = (lt.tm_hour / 3 + i) * 3; g_fc.s[i].day = h / 24; g_fc.s[i].hour = h % 24; g_fc.s[i].t = T[i]; g_fc.s[i].code = CODE[i]; }
     g_fc_have = 1; pthread_mutex_unlock(&g_fc_mu);
     simple_cfg_set_str("weather_loc", "Amsterdam");
     weather_app_refresh();
@@ -491,7 +495,7 @@ void weather_app_create(lv_obj_t *root)
     lv_label_set_long_mode(g_wd_loc, LV_LABEL_LONG_SCROLL_CIRCULAR); lv_obj_set_width(g_wd_loc, 150);
     lv_obj_set_style_text_align(g_wd_loc, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(g_wd_loc, LV_ALIGN_CENTER, 0, 46);
-    lv_obj_add_flag(g_wd_loc, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_ext_click_area(g_wd_loc, 10);
+    lv_obj_add_flag(g_wd_loc, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_ext_click_area(g_wd_loc, 18);
     lv_obj_add_event_cb(g_wd_loc, loc_tap_cb, LV_EVENT_SHORT_CLICKED, NULL);
     lv_obj_add_event_cb(g_wd_loc, loc_tap_cb, LV_EVENT_LONG_PRESSED, NULL);
     g_wd_hl = wlabel(root, TF(UI_12), TC(TEXT_DISABLED));
@@ -596,7 +600,10 @@ void weather_app_create(lv_obj_t *root)
             lv_obj_set_style_text_font(g_wd_temp[k], zune_font(&font_zune_regular_13), 0);
             lv_obj_set_style_text_color(g_wd_temp[k], k ? TC(TEXT_SECONDARY) : TC(ACCENT_PRIMARY), 0);
             lv_obj_align(g_wd_temp[k], LV_ALIGN_CENTER, (int32_t)lroundf(150 * cosf(a)), (int32_t)lroundf(150 * sinf(a)));
-            lv_obj_add_flag(g_wd_hour[k], LV_OBJ_FLAG_HIDDEN);
+            /* the hour just inside its temperature (the top one reads "now") */
+            lv_obj_set_style_text_font(g_wd_hour[k], &font_zune_semibold_11, 0);
+            lv_obj_set_style_text_color(g_wd_hour[k], k ? TC(TEXT_DISABLED) : TC(ACCENT_PRIMARY), 0);
+            lv_obj_align(g_wd_hour[k], LV_ALIGN_CENTER, (int32_t)lroundf(128 * cosf(a)), (int32_t)lroundf(128 * sinf(a)));
         }
         lv_obj_align(g_wd_cicon, LV_ALIGN_TOP_MID, 0, 56);
         lv_obj_set_style_text_font(g_wd_ctemp, zune_font(&font_zune_light_88), 0); lv_obj_set_style_text_color(g_wd_ctemp, TC(TEXT_PRIMARY), 0);

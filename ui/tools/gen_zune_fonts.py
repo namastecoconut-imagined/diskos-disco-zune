@@ -9,8 +9,9 @@ UI = Path(__file__).resolve().parent.parent
 TEXT = '0x20-0x7E,0xA0-0xFF,0x2018-0x201D,0x2026,0x2022,0x203A'
 DIGITS = '0x20,0x25,0x2D,0x2E,0x30-0x3A,0xB0'          # space % - . 0-9 : °
 WORDMARK = '0x63,0x64,0x69,0x73'                       # "disc" (the boot splash)
+GHOST = '0x20,0x26,0x27,0x2D,0x2E,0x30-0x39,0x61-0x7A,0xDF-0xFF'   # lowercase only: the faint artist name behind Now Playing
 CUTS = {  # weight name -> (wght, [(px, range)])
-    'light':    (300, [(18, TEXT), (21, TEXT), (24, TEXT), (32, TEXT), (46, TEXT), (50, TEXT), (28, TEXT), (40, TEXT), (72, DIGITS), (88, DIGITS), (96, DIGITS), (150, DIGITS), (64, WORDMARK)]),
+    'light':    (300, [(18, TEXT), (21, TEXT), (24, TEXT), (32, TEXT), (46, TEXT), (50, TEXT), (28, TEXT), (40, TEXT), (72, DIGITS), (88, DIGITS), (96, DIGITS), (150, DIGITS), (64, WORDMARK), (80, GHOST)]),
     'regular':  (400, [(12, TEXT), (13, TEXT), (14, TEXT), (15, TEXT), (16, TEXT), (17, TEXT), (19, TEXT)]),
     'semibold': (600, [(10, TEXT), (11, TEXT), (12, TEXT), (22, TEXT), (24, TEXT)]),
 }

@@ -8,6 +8,7 @@ static const display_entry_t DISPLAY_ENTRIES[]={
     {"theme_variant",NULL,"Appearance","Light / dark",10},
     {"theme_auto",NULL,"Appearance","Automatic appearance",20},
     {"outdoor",NULL,"Appearance","Outdoor mode",30},
+    {"zhome_bg",NULL,"Appearance","Home background",35},
     {"null_palette",NULL,"Appearance","Colour scheme",40},
     {"disco_sheen",NULL,"Appearance","Rim sheen",50},
     {"disco_eq",NULL,"Appearance","Equalizer colours",60},
@@ -37,6 +38,7 @@ static const display_entry_t DISPLAY_ENTRIES[]={
     {"saver_idx",NULL,"Standby","Screensaver delay",10},
     {"screenoff_idx",NULL,"Standby","Screen-off delay",20},
     {"saver_style",NULL,"Standby","Screensaver style",30},
+    {"zdock",NULL,"Standby","Desk clock",40},
     {"disco_qs_style",NULL,"Quick settings","Layout",10},
     {"null_qs_layout",NULL,"Quick settings","Layout",20},
     {"disco_hints",NULL,"Navigation","Interaction hints",50},
@@ -112,9 +114,12 @@ static const char *display_disabled_reason(const setting_t *s){
     if(!strcmp(k,"imm_scrub_action")&&!simple_cfg_get_int("imm_scrub",0))return "Enable Circular control first.";
     if(s->apply==apply_open_colorpick && (th_simple()||th_null()))return accent_disabled_reason();
     if(!strcmp(k,"theme_variant") && th_null())return "Null uses a fixed dark appearance. Choose a colour scheme instead.";
-    if(!strcmp(k,"theme_auto") && !theme_auto_supported())return "Automatic light/dark switching is available in Disco, Ring and Braun.";
+    if(!strcmp(k,"theme_auto") && !theme_auto_supported())return "Automatic light/dark switching is available in Disco, Ring, Braun and Zune.";
     if(!strcmp(k,"null_side"))return "Null keeps its navigation on the right.";
     if(s->apply==apply_output && !th_zune())return "The output picker belongs to the Zune theme.";
+    if(!strcmp(k,"boot_resume") && !th_zune())return "Starting empty belongs to the Zune theme.";
+    if(!strcmp(k,"zdock") && !th_zune())return "The desk clock belongs to the Zune lock screen.";
+    if(!strcmp(k,"zhome_bg") && !th_zune())return "The home background belongs to the Zune theme.";
     if((!strcmp(k,"zlock_src") || !strcmp(k,"zlock_tint")) && !th_zune())return "This option belongs to the Zune lock screen.";
     if(!strcmp(k,"null_palette") && !th_null())return "Colour schemes are specific to Null. Use light/dark and accent settings for this theme.";
     if(!strncmp(k,"null_",5) && !th_null())return "This option is available in Null.";

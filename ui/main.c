@@ -44,7 +44,6 @@
 #include "prof.h"
 #include "lvgl/src/drivers/evdev/lv_evdev.h"
 #include "config.h"
-#include "lastfm.h"
 #include "scanner.h"
 #include "playstate.h"
 #include "stats.h"
@@ -74,6 +73,12 @@ static uint32_t g_zplug;             /* Zune: a charger was just connected (tick
 /* Zune: the power key shows the lock screen for a moment before the panel goes dark, and every wake lands on it */
 static uint32_t g_zprev_at;          /* lock-screen preview after a power-key blank (tick | 1, 0 = none) */
 static int g_zprev_cancel;           /* a 2nd power press during the preview: the player turned the screen back on */
+static int g_dock_on, g_dock_dim;   /* zune45 desk clock: active (on the charger), and the panel is at its dim level */
+static int dock_level(void){ int b = ui_effective_brightness(); int d = simple_cfg_get_int("zdock_bri", 4); return b < d ? (b < 1 ? 1 : b) : d; }
+void zsaver_set_dock(int on);
+static unsigned g_bright_gen;       /* zune47: the player generation whose brightness reset was already undone */
+static double g_up0;                /* zune49: seconds since power-on when main() began */
+static uint32_t g_ztap_at;          /* Zune lock screen: a tap waiting to unlock */
 static uint32_t g_zunlock_at;       /* the lock screen was just tapped away: LVGL stays deaf a moment */
 static int g_zlift_seen = 1;         /* after a wake onto the lock screen: the waking finger has lifted */
 /* power-key trace for the lock-screen preview: /tmp/sdcard/.diskos/pwr.log (capped), so a device run can be read back */
@@ -138,6 +143,7 @@ static int         g_dbg = 0;          /* show tap dot (only if /usr/data/touch_
  * A navigation swipe (back / hub) is told apart from a seek by being a LONG,
  * STRAIGHT, horizontal slide - a seek drag follows the ring's curve, so it is
  * shorter and/or carries a vertical component. */
+#define BACK_MS (th_zune() ? 1000 : 700)   /* zune47: a slow, deliberate back swipe counts too */
 #define NP_NAV_DIST 95    /* min horizontal travel for a back/hub swipe on NP (eased from 110) */
 #define NP_NAV_STRAIGHT 3 /* require |dx| > this * |dy| (nearly horizontal) */
 static int g_swipe_thresh = SWIPE_THRESH_DEFAULT;   /* cached for the hot loop */
@@ -1061,6 +1067,13 @@ static int books_ensure_migrated(void){
 static void migrate_books_retry_cb(lv_timer_t *t){
     if(books_ensure_migrated()) lv_timer_del(t);   /* 1 = clean or committed -> done */
 }
+static void boot_deferred_cb(lv_timer_t *t){
+    (void)t;
+    if(simple_cfg_get_int("weather_on", 1)) weather_fetch_async();
+    if(th_zune() && !simple_cfg_get_int("zguide_done", 0) && screen_current() == SCR_HOME) zune_guide_open();   /* zune47: once */   /* first fetch - only with Weather on (Settings off = no network use) */
+    if(!books_ensure_migrated())                         /* move any .m4b left in SONG out to BOOKS (upgrade / no-rescan devices) so books never sit in the music queue */
+        lv_timer_create(migrate_books_retry_cb, 3000, NULL);   /* failed (transient reader lock) -> retry off the main loop until it succeeds */
+}
 /* Port playlists on upgrade (e.g. a pre-1.2.0 diskOS library on V2.57): stock's player creates its own playlist index
  * (placeholder names "custom list <id>", missing later diskOS playlists) when it first starts, possibly after the UI. So
  * reconcile from boot, retrying until the index exists and agrees - never waiting for the user to open Playlists.
@@ -1339,7 +1352,8 @@ void ui_shutdown_screen(void){
     lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
     lv_obj_add_flag(o, LV_OBJ_FLAG_CLICKABLE);                  /* taps do nothing now */
     lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE);
-    if(th_braun()){
+    if(th_zune()){ void zune_shutdown_build(lv_obj_t *o); zune_shutdown_build(o); }
+    else if(th_braun()){
         br_face(o);
         lv_obj_t *k = br_knob(o, 180, 140, 52, LV_SYMBOL_POWER, TF(UI_38));
         br_knob_set_on(k, 1);
@@ -1792,6 +1806,7 @@ void ui_set_sleep_eoc(long target_ms, const char *path, int at_book_end){
     if(target_ms > 0 && path && path[0]){ g_sleep_eoc = target_ms; g_sleep_eoc_atend = at_book_end ? 1 : 0; snprintf(g_sleep_eoc_path, sizeof g_sleep_eoc_path, "%s", path); }
     else { g_sleep_eoc = -1; g_sleep_eoc_atend = 0; }
 }
+int ui_sleep_total_secs(void){ return (int)(g_sleep_ms / 1000u); }   /* the armed duration (Zune's shrinking rim ring) */
 /* Sleep state for the UI: 0 = off, 1 = duration (fills *secs_left), 2 = end-of-chapter. */
 int ui_sleep_state(int *secs_left){
     if(g_sleep_ms){
@@ -1809,15 +1824,6 @@ static char g_app_exec[256];
 static int  g_app_pending = 0;
 void app_launch_direct(const char *exec){ snprintf(g_app_exec, sizeof g_app_exec, "%s", exec); g_app_pending = 1; }
 void app_launch(const char *exec){
-    if(!strcmp(exec, APP_BUILTIN_ROULETTE) || !strcmp(exec, "/usr/data/apps/album-roulette/app")){   /* built in since 2.2.0 */
-        screen_show(SCR_ROULETTE);
-        return;
-    }
-    if(!strcmp(exec, APP_BUILTIN_BOOMSHINE)){
-        boomshine_landing();
-        return;
-    }
-    if(!strcmp(exec, APP_BUILTIN_SPHERE)){ sphere_ui_open(); return; }   /* built in: a screen of mq_ui */
     if(!strcmp(exec, APP_BUILTIN_STATS)){
         stats_landing();
         return;
@@ -1911,8 +1917,7 @@ void ui_app_play_ids(int *ids, int n, int shuffle, const char *name, int play, i
 }
 
 static void app_run(const char *exec){
-    /* a game built into mq_ui ("builtin:boomshine") runs as this same program with its own flag */
-    int builtin = !strcmp(exec, APP_BUILTIN_BOOMSHINE);
+    const int builtin = 0;                           /* (Boomshine, the one game built into mq_ui, was removed in zune50) */
     /* preflight: a missing/non-executable app shouldn't blank the screen for nothing */
     if(!builtin && access(exec, X_OK) != 0){
         lv_obj_invalidate(lv_screen_active()); lv_refr_now(NULL);
@@ -1925,7 +1930,6 @@ static void app_run(const char *exec){
     int failed = 0, killed = 0;
     pid_t pid = -1;
     char *argv[] = { (char *)exec, NULL, NULL };
-    if(builtin){ argv[0] = "/proc/self/exe"; argv[1] = "--boomshine"; }   /* the running image, never a path that can change */
     if(command_spawn(&pid, argv) != 0) pid = -1;   /* posix_spawn in its own group (a fork() of the UI can fail for memory) */
     if(pid > 0){
         int status = 0;
@@ -2246,14 +2250,33 @@ static uint32_t  rim_last_ms = 0;
 static lv_obj_t *rim_scroller = NULL;
 static int       rim_cover = 0;          /* rim gesture is driving the cover flow (no list scroller) */
 
+/* zune47: any vertical list on the screen (or on an overlay above it) - the biggest one that can scroll */
+static lv_obj_t *rim_find(lv_obj_t *o, int depth){
+    if(!o || depth > 8 || lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN)) return NULL;
+    lv_obj_t *best = NULL; int best_a = 0;
+    if(lv_obj_has_flag(o, LV_OBJ_FLAG_SCROLLABLE) && (lv_obj_get_scroll_dir(o) & LV_DIR_VER)
+       && lv_obj_get_scroll_top(o) + lv_obj_get_scroll_bottom(o) > 8){
+        best = o; best_a = lv_obj_get_width(o) * lv_obj_get_height(o); }
+    for(uint32_t i = 0; i < lv_obj_get_child_count(o); i++){
+        lv_obj_t *c = rim_find(lv_obj_get_child(o, (int32_t)i), depth + 1);
+        if(c){ int a = lv_obj_get_width(c) * lv_obj_get_height(c); if(a > best_a){ best = c; best_a = a; } }
+    }
+    return best;
+}
 static lv_obj_t *ui_active_scroller(void){
     switch(screen_current()){
         case SCR_LIBRARY: return library_scroller();
         case SCR_PLVIEW:  return playlistview_scroller();
         case SCR_SEARCH:  return search_scroller();
-        case SCR_APPS:    return apps_scroller();
-        default:          return NULL;
+        case SCR_APPS:    if(!th_zune()) return apps_scroller(); break;
+        default:          break;
     }
+    if(!th_zune()) return NULL;
+    /* Zune: every list follows a finger round the rim, like a click wheel - an overlay's list first */
+    lv_obj_t *top = lv_layer_top(), *sc = NULL;
+    for(int32_t i = (int32_t)lv_obj_get_child_count(top) - 1; i >= 0 && !sc; i--) sc = rim_find(lv_obj_get_child(top, i), 0);
+    if(!sc) sc = rim_find(screen_get_root(screen_current()), 0);
+    return sc;
 }
 static float rim_ang(int x, int y){ return atan2f((float)(y-180), (float)(x-180)); }
 static float rim_wrap(float d){ if(d>(float)M_PI) d-=2.0f*(float)M_PI; else if(d<-(float)M_PI) d+=2.0f*(float)M_PI; return d; }
@@ -2345,16 +2368,12 @@ static void rim_spring_back(lv_obj_t *sc){
 static int rim_release(void){
     int owned=(rim_state==RIM_OWN);
     if(owned && rim_cover)          albumwall_settle();        /* cover flow: snap to the nearest album */
-    else if(owned && rim_scroller)  rim_spring_back(rim_scroller);
+    else if(owned && rim_scroller){ rim_spring_back(rim_scroller);
+        if(lv_obj_is_valid(rim_scroller) && lv_obj_get_scroll_snap_y(rim_scroller) != LV_SCROLL_SNAP_NONE)
+            lv_obj_update_snap(rim_scroller, LV_ANIM_ON); }       /* zune47: a dial settles on an item */
     rim_state=RIM_IDLE; rim_scroller=NULL; rim_cover=0; return owned;
 }
 
-/* Last.fm: every 1s, feed the current play-state to the watcher (now-playing + scrobble
- * eligibility) and pump the network worker / offline queue. All on the LVGL thread. */
-static void lastfm_tick(lv_timer_t *t){
-    (void)t; track_state_t st; ipc_get_state(&st);
-    lastfm_watch(&st); lastfm_poll();
-}
 
 static int launch_status_get(void);   /* player-launcher verdict; defined with the launch gate below */
 /* ---- microSD coldplug worker (native thread) -------------------------------
@@ -3147,13 +3166,8 @@ int main(int argc, char **argv){
     /* MA Sendspin: this same binary runs the Music Assistant player as a child (ma.c starts it as
      * "ma-sendspin --sendspin ...": a different argv[0], so fiio_init's `pgrep -x mq_ui` never mistakes it for the UI) */
     if(argc > 1 && !strcmp(argv[1], "--sendspin")){ int sendspin_main(int, char **); return sendspin_main(argc - 1, argv + 1); }
+    { FILE *u = fopen("/proc/uptime", "r"); if(u){ if(fscanf(u, "%lf", &g_up0) != 1) g_up0 = 0; fclose(u); } }   /* zune49: boot timing */
     crashlog_install();          /* /usr/data/diskos_crash.log: a line per start, player restart and crash */
-    if(argc > 1 && !strcmp(argv[1], "--boomshine")){        /* the built-in game (Disco menu > Boomshine); log as the app did */
-        int boomshine_main(int, char **);
-        if(!freopen("/tmp/boomshine.log", "w", stdout)) { /* keep going without a log */ }
-        dup2(fileno(stdout), fileno(stderr));
-        return boomshine_main(argc - 1, argv + 1);
-    }
     /* Arm the boot watchdog BEFORE anything else - in particular before the argv dispatch and the
      * stock-UI selection below. Those read /usr/data and /dev/mem, so they can block; until now they
      * ran with no deadline at all, and a hang there took away the user's route to the stock firmware
@@ -3286,6 +3300,9 @@ int main(int argc, char **argv){
     theme_init();   /* the palette for this run: before any screen is built */
     swipe_thresh_load();
     settings_apply_startup();   /* restore saved brightness */
+    if(!getenv("DISKOS_THEME_RELOAD")){ void splash_early(void); splash_early();   /* zune49: the splash's first pose now, not after start-up */
+        FILE *u = fopen("/proc/uptime", "r"); double up = 0; if(u){ if(fscanf(u, "%lf", &up) != 1) up = 0; fclose(u); }
+        crashlog_note("boot: started %.1f s, first frame %.1f s after power-on", g_up0, up); }
     wifi_init_intent();         /* seed wifi_on intent from stock WIFI_STATUS (first run only) */
     fprintf(stderr,"step:screens_init\n");fflush(stderr); screens_init(); ma_boot();   /* MA Sendspin comes back if it was on */
     home_set_settings_click_cb(go_settings);
@@ -3301,13 +3318,10 @@ int main(int argc, char **argv){
     status_poll_cb(NULL);                        /* populate immediately */
     bt_boot_restore();                           /* re-enable BT + arm auto-route if it was on (persist like WiFi) */
     g_t_wx  = lv_timer_create(weather_poll, 1000, NULL);  /* apply weather + retry/refresh */
-    if(simple_cfg_get_int("weather_on", 1)) weather_fetch_async();   /* first fetch - only with Weather on (Settings off = no network use) */
+    /* zune41: the first weather fetch, Last.fm's queue and the books check wait until Home is up (boot time) */
+    { lv_timer_t *dt = lv_timer_create(boot_deferred_cb, 3000, NULL); lv_timer_set_repeat_count(dt, 1); }
     g_t_lyr = lv_timer_create(lyrics_poll, 500, NULL);    /* apply finished lyrics fetch */
-    lastfm_init();                                        /* load Last.fm config + offline queue */
-    lv_timer_create(lastfm_tick, 1000, NULL);            /* watch play-state + drive scrobbles */
     lv_timer_create(scanner_poll, 500, NULL);            /* apply a finished library rescan */
-    if(!books_ensure_migrated())                         /* move any .m4b left in SONG out to BOOKS (upgrade / no-rescan devices) so books never sit in the music queue */
-        lv_timer_create(migrate_books_retry_cb, 3000, NULL);   /* failed (transient reader lock) -> retry off the main loop until it succeeds */
     lv_timer_create(playlist_port_cb, 5000, NULL);       /* bring pre-1.2.0 / stock-migrated playlists into agreement (see playlist_port_cb) */
     lv_timer_create(sd_features_gate_cb, 500, NULL);     /* start SD-backed features only on a positive launcher verdict */
     g_t_art = lv_timer_create(ui_art_poll, 120, NULL);    /* apply finished album-art decode (worker thread) */
@@ -3351,6 +3365,9 @@ int main(int argc, char **argv){
             /* Match Disc Shelf's LVGL drag threshold on every scrollable screen.
              * Keep the existing momentum/throw defaults and gesture routing. */
             lv_indev_set_scroll_limit(g_touch, 10);
+            lv_timer_set_period(lv_indev_get_read_timer(g_touch), 10);   /* zune45: read the touch every 10 ms (was 33) */
+            { lv_display_t *dd = lv_display_get_default(); lv_timer_t *rt = dd ? lv_display_get_refr_timer(dd) : NULL;
+              if(rt) lv_timer_set_period(rt, 20); }                        /* and draw up to 50 frames a second (was 30) */
             g_dbg = (access("/usr/data/touch_dbg", 0)==0);
             if(g_dbg) dbgdot_init();
             fprintf(stderr,"touch ENABLED indev=%p dbg=%d thresh=%d\n",(void*)g_touch,g_dbg,g_swipe_thresh);
@@ -3660,10 +3677,11 @@ int main(int argc, char **argv){
                     cover_tap = 0;
                     fsart_touch = ui_np_fsart_active();   /* latch: overlay owns this whole gesture */
                     sleep_touch = ui_np_overlay_active() || azjump_owns_point(p.x,p.y)   /* latch: the sleep popover owns this whole gesture, */
-                               || (screen_current()==SCR_EQ_EDITOR && eqcustom_owns_point(p.x, p.y))    /* and so does the EQ dial (fork) */
-                               || (screen_current()==SCR_SPHERE && sphere_ui_owns_point(p.x, p.y));     /* and SongSphere's marker */
+                               || (screen_current()==SCR_EQ_EDITOR && eqcustom_owns_point(p.x, p.y));   /* and so does the EQ dial (fork) */
                     seek_touch = dhome_owns_point(p.x, p.y) || simple_owns_point(p.x,p.y);
                     if(th_null() && null_owns_point(p.x,p.y))sleep_touch=1;   /* fork: Disco Music's seek line / ring (no swipe to Apps) */
+                    { int zmodal_active(void); if(th_zune() && zmodal_active()) sleep_touch = 2; }   /* zune45: an overlay owns the touch */
+                    if(sleep_touch == 2) rim_press(sx, sy);   /* zune47: an overlay's own list still turns with the rim */
                     if(fsart_touch || sleep_touch){
                         /* a modal overlay is up -> LVGL handles it; arm no ring seek / rim scroll here */
                     } else if(screen_current()==SCR_NOWPLAYING){
@@ -3688,14 +3706,11 @@ int main(int argc, char **argv){
             } else if(ts==LV_INDEV_STATE_PRESSED){
                 last_activity = lv_tick_get();
                 lastx=p.x; lasty=p.y; g_press_lx=p.x; g_press_ly=p.y;
-                g_hint_late = lv_tick_elaps(sms) >= 700;   /* the bubble only fills while the swipe would still count */
+                g_hint_late = lv_tick_elaps(sms) >= BACK_MS;   /* the bubble only fills while the swipe would still count */
                 if(!woke && !fsart_touch && BACK_EDGE(sx) && screen_current()!=SCR_NOWPLAYING && screen_current()!=SCR_SAVER && !sleep_touch && SIDE_DX(p.x - sx) > 0
                    && !screen_back_leads_nowhere()                       /* no arrow where Back can't go anywhere */
                    && abs(p.x - sx) > 2 * abs(p.y - sy)) ui_back_hint(p.y, SIDE_DX(p.x - sx));   /* fork: back-swipe feedback */
                 else ui_back_hint(0, 0);
-                if(!woke && !fsart_touch && !sleep_touch && !seek_touch && screen_current()==SCR_HOME && SIDE_DX(p.x-sx)<0
-                   && abs(p.x-sx)>2*abs(p.y-sy))ui_shortcuts_hint(p.y,-SIDE_DX(p.x-sx));
-                else ui_shortcuts_hint(0,0);
                 if(!woke && !fsart_touch && sy > 320 && screen_current()!=SCR_HOME && screen_current()!=SCR_QUICK && screen_current()!=SCR_SAVER && screen_current()!=SCR_NOWPLAYING && !sleep_touch
                    && sy - p.y > 0 && abs(p.y - sy) > 2 * abs(p.x - sx)) ui_home_hint(p.x, sy - p.y);   /* fork: home-swipe feedback */
                 else ui_home_hint(0, 0);
@@ -3727,6 +3742,9 @@ int main(int argc, char **argv){
                      * it must still fall through to nav (back/hub). Order-independent: only LVGL
                      * mutates fsart state, so there's no open/close race. */
                     int cover_tap_gesture = cover_tap && adx < 20 && ady < 20;
+                    if(sleep_touch == 2 && BACK_EDGE(sx) && adx > ady * 2 && SIDE_DX(dx) > 0 && adx >= g_swipe_thresh && dt < BACK_MS){
+                        int zmodal_close_top(void); zmodal_close_top();   /* zune45: the edge swipe closes the overlay */
+                    }
                     int lvgl_owned = fsart_touch || cover_tap_gesture || sleep_touch;
                     /* a committed seek on Now Playing consumes the gesture. Replay the (fused) final
                      * position through the move handler first so the ring commits the release point, not
@@ -3756,26 +3774,25 @@ int main(int argc, char **argv){
                         /* On Now Playing a nav swipe must be a LONG, STRAIGHT,
                          * horizontal slide (so it's not confused with a seek drag
                          * along the ring): right = hub, left = back. */
-                        if(th_zune() && BACK_EDGE(sx) && horiz && SIDE_DX(dx)>0 && adx>=g_swipe_thresh && dt<700){
+                        if(th_zune() && vert && dy < 0 && ady >= g_swipe_thresh && dt < 900 && sy > 60){
+                            ui_np_fsart_open();   /* fork (Zune, zune43): a swipe up opens Immersive */
+                        } else if(th_zune() && BACK_EDGE(sx) && horiz && SIDE_DX(dx)>0 && adx>=g_swipe_thresh && dt<BACK_MS){
                             screen_back();   /* fork (Zune): the usual edge swipe works here too; the rim seek only
                                               * takes drags ALONG the rim, so an edge swipe inward never reaches it */
                         } else if(th_zune() && adx >= 80 && adx > ady*2 && dt<900){
-                            /* fork (Zune): right to left = the actions menu (as on every theme), left to right (not
-                             * from the edge) = the spinning record; back is the edge swipe above */
-                            if(SIDE_DX(dx) < 0) screen_show(SCR_NPHUB);
-                            else                ui_np_fsart_open();
+                            /* fork (Zune, zune41): a swipe across skips - right to left = next song, left to right
+                             * (not from the edge) = previous; back is the edge swipe above, the actions menu is a tap
+                             * on the title */
+                            int ui_transport_command(const char *cmd);
+                            ui_transport_command(dx < 0 ? "0201000C0001" : "0201000C0002");
                         } else if(adx >= NP_NAV_DIST && adx > ady*NP_NAV_STRAIGHT && dt<900){
                             if(dx < 0) screen_show(SCR_NPHUB);
                             else       screen_back();
                         }
-                    } else if(cur==SCR_HOME && horiz && SIDE_DX(dx)<0 && adx>=g_swipe_thresh && dt<700 && !seek_touch){
-                        apps_reload();
-                        onboarding_discovered(HINT_SHORTCUTS);
-                        screen_show(SCR_APPS);    /* slide in the Apps panel */
                     } else if(cur==SCR_ALBUMWALL && s_press_scr==SCR_ALBUMWALL){
                         /* gated on s_press_scr so the very tap that OPENED the cover flow (a click on the
                          * Library "Albums" row) is never re-read here as a cover tap that plays. */
-                        if(BACK_EDGE(sx) && horiz && SIDE_DX(dx)>0 && adx>=g_swipe_thresh && dt<700){
+                        if(BACK_EDGE(sx) && horiz && SIDE_DX(dx)>0 && adx>=g_swipe_thresh && dt<BACK_MS){
                             albumwall_drag_cancel();            /* left-edge right-swipe = back (drag wasn't armed here) */
                             screen_back();
                         } else if(adx<18 && ady<18 && sx>=100 && sx<=260 && sy>=(th_zune()?100:76) && sy<=(th_zune()?252:214) && dt<900){
@@ -3786,7 +3803,7 @@ int main(int argc, char **argv){
                             albumwall_drag(lastx);              /* apply the (fused) final finger position first */
                             albumwall_drag_end();               /* then finger drag -> inertial fling + snap */
                         }
-                    } else if(horiz && SIDE_DX(dx)>0 && adx>=g_swipe_thresh && dt<700 &&
+                    } else if(horiz && SIDE_DX(dx)>0 && adx>=g_swipe_thresh && dt<BACK_MS &&
                               BACK_EDGE(sx)){
                         onboarding_discovered(HINT_BACK);
                         fprintf(stderr,"BACK swipe sx=%d dx=%d dy=%d dt=%u\n",sx,dx,dy,dt); fflush(stderr);
@@ -3897,6 +3914,15 @@ int main(int argc, char **argv){
                 /* the player blanked while diskOS already had the panel dark (idle): remember it, so the player's own
                  * un-blank (the next power press) lights the panel again instead of being ignored */
                 player_blanked = 1; zpwr_log("player blank while dark");
+            } else if(th_zune() && bl_state == 0 && cbp == 0 && cbr > 0 && cbr != ui_effective_brightness() && !player_blanked
+                      && screen_current() != SCR_QUICK && screen_current() != SCR_SETTING_DETAIL
+                      && (lv_tick_get() < 120000 || ipc_generation() != g_bright_gen)){
+                /* zune47: the player puts back its own remembered brightness when it settles in after boot (or a
+                 * restart): the panel dimmed a little. Put the diskOS level back - only in that window, never while
+                 * someone is setting it */
+                zpwr_log("brightness: player set %d, back to %d", cbr, ui_effective_brightness());
+                ui_backlight(ui_effective_brightness());
+                if(lv_tick_get() >= 120000) g_bright_gen = ipc_generation();
             } else if(bl_state != 2 && cbp != 0 && cbr > 0){
                 /* self-heal: diskOS thinks the panel is lit but the rail is off - light it again */
                 zpwr_log("heal: rail off while lit bl=%d br=%d bp=%d scr=%d", bl_state, cbr, cbp, screen_current());
@@ -4000,6 +4026,10 @@ int main(int argc, char **argv){
                 { int was = fbpan_wake(); zpwr_log("touch wake: panel re-armed (pan was %d)", was); }   /* the player's blank can leave the panel itself off */
                 g_manual_sleep = 1; g_manual_sleep_at = lv_tick_get(); g_zlift_seen = lifted;
                 if(touch_gate_on) touch_gate_wake = lifted ? 0 : lv_tick_get() | 1;
+            } else if(th_zune() && any && bl_state == 1 && screen_current() == SCR_SAVER){
+                /* Zune lock screen: one tap unlocks (the unlock itself runs just below) */
+                if(pressed) g_ztap_at = lv_tick_get() | 1;   /* zune47: one tap unlocks, straight away (no double-tap play/pause) */
+                if(lifted) g_zlift_seen = 1;
             } else if(any && bl_state){
                 if(th_zune()){ zpwr_log("touch unlock bl=%d scr=%d lifted=%d gate=%d", bl_state, screen_current(), lifted, touch_gate_on);
                                if(screen_current() == SCR_SAVER) g_zunlock_at = lv_tick_get() | 1; }
@@ -4012,6 +4042,18 @@ int main(int argc, char **argv){
                 if(touch_gate_on) touch_gate_wake = lifted ? 0 : lv_tick_get() | 1;   /* the waking touch never acts: wait for the lift */
                 onboarding_woke_by_touch();                  /* once: the power button is the pocket lock */
             } else if(touch_gate_wake && lifted) touch_gate_wake = 0;
+        }
+        if(g_ztap_at){                                             /* a tap on the Zune lock screen: unlock */
+            g_ztap_at = 0;
+            if(bl_state == 1 && screen_current() == SCR_SAVER){
+                zpwr_log("touch unlock (single tap)");
+                g_zunlock_at = lv_tick_get() | 1;
+                last_activity = lv_tick_get();
+                ui_backlight(ui_effective_brightness()); bl_state = 0; player_blanked = 0;
+                screen_back();
+                if(touch_gate_on) touch_gate_wake = lv_tick_get() | 1;   /* the finger may still be down: wait for its lift */
+                onboarding_woke_by_touch();
+            }
         }
         if(kbinput_active()) last_activity = lv_tick_get();
         {   /* Zune (Figma 09): plugging in lights the glass on the charging screen; left alone it goes dark again */
@@ -4027,7 +4069,9 @@ int main(int argc, char **argv){
                 }
             }
             if(shown && lv_tick_elaps(shown) > 6000){
-                if(lit_by_us && screen_current() == SCR_USAGE && lv_display_get_inactive_time(NULL) >= 5500){
+                if(lit_by_us && screen_current() == SCR_USAGE && lv_display_get_inactive_time(NULL) >= 5500 && g_dock_on){
+                    screen_show(SCR_SAVER); ui_backlight(dock_level()); bl_state = 1; g_dock_dim = 1;   /* zune45: the desk clock */
+                } else if(lit_by_us && screen_current() == SCR_USAGE && lv_display_get_inactive_time(NULL) >= 5500){
                     screen_back(); ui_backlight(0); bl_state = 2;        /* back to how it was: dark, on the lock screen */
                 }
                 shown = 0; lit_by_us = 0;
@@ -4037,9 +4081,38 @@ int main(int argc, char **argv){
              * other than Playback (USB DAC, Bluetooth DAC, BT streaming, AirPlay, USB storage) is the Disc in use
              * without a song of its own moving, and a Disc on external power (plugged in, or charging) is on purpose:
              * neither powers off. */
-            int busy = playing || ma_playing() || ui_get_source_mode() != 0 || usage_charging() || usage_plugged_in() == 1;
+            /* USB-C audio: the port is powering a DAC, not being charged, though the kernel may still list it online */
+            int usb_out = modes_output_route() == OUT_USB;
+            int plugged = !usb_out && (usage_charging() || usage_plugged_in() == 1);
+            int busy = playing || ma_playing() || ui_get_source_mode() != 0 || plugged;
+            {   /* zune47: at start the player loads the last song; unless Resume Last Song is on, start empty instead */
+                static int boot_done;
+                if(!boot_done && th_zune()){
+                    track_state_t bs; ipc_get_state(&bs);
+                    if(simple_cfg_get_int("boot_resume", 0) || lv_tick_get() > 30000 || playing) boot_done = 1;
+                    else if(bs.have_track && lv_tick_get() > 4000){
+                        void queue_clear(void);
+                        boot_done = 1; queue_clear(); ipc_dismiss_track();
+                        zpwr_log("start: the last song put away (empty queue)");
+                    }
+                }
+            }
             power_tick(last_activity, busy);
+            static uint32_t idle_log;                    /* trace (cfg zpwr_trace): why the Disc is or isn't idle, once a minute */
+            if(lv_tick_elaps(idle_log) >= 60000){ idle_log = lv_tick_get();
+                zpwr_log("idle: setting=%d quiet=%us play=%d ma=%d src=%d chg=%d plug=%d usbout=%d",
+                         cfg_get_int("idle_off_idx", 0), (unsigned)(lv_tick_elaps(last_activity) / 1000u), playing, ma_playing(),
+                         ui_get_source_mode(), usage_charging(), usage_plugged_in(), usb_out); }
         }   /* Sendspin: AirPlay playback the player may not report */   /* AFTER all input is consumed (a pending touch must win the race): SD-safe shutdown, diskOS idle power-off, temperature notice */
+        {   /* zune45 desk clock: on (cfg zdock, default on) while on external power, not while USB-C drives a DAC */
+            int want = th_zune() && simple_cfg_get_int("zdock", 1) && modes_output_route() != OUT_USB
+                       && (usage_charging() || usage_plugged_in() == 1);
+            if(bl_state == 0) g_dock_dim = 0;
+            if(want != g_dock_on){
+                g_dock_on = want; zsaver_set_dock(want); zpwr_log("desk clock %s", want ? "on" : "off");
+                if(!want && g_dock_dim && bl_state == 1){ ui_backlight(0); bl_state = 2; g_dock_dim = 0; }   /* unplugged: dark as usual */
+            }
+        }
         int in_saver = (screen_current()==SCR_SAVER);
         /* Zune: the lock screen takes no touch of its own (the raw path unlocks it only while dimmed), so a lit lock
          * screen with no countdown armed could never be left: always arm the 10 s one there */
@@ -4086,7 +4159,11 @@ int main(int argc, char **argv){
             uint32_t off_at = (manual && th_zune()) ? 10000u   /* Zune: a woken lock screen goes dark after 10 s */
                                      : manual ? (uint32_t)(screenoff_extra > 0 ? screenoff_extra : 10)*1000
                                      : (uint32_t)(saver_timeout+screenoff_extra)*1000;
-            if(bl_state==1 && (manual || screenoff_extra > 0) && idle > off_at){
+            if(bl_state==1 && (manual || screenoff_extra > 0) && idle > off_at && g_dock_on){
+                /* zune45 desk clock: on the charger the lock screen stays on, dimmed, instead of going dark */
+                if(!g_dock_dim){ if(screen_current() != SCR_SAVER) screen_show(SCR_SAVER);
+                                 ui_backlight(dock_level()); g_dock_dim = 1; zpwr_log("desk clock: dimmed"); }
+            } else if(bl_state==1 && (manual || screenoff_extra > 0) && idle > off_at){
                 ui_backlight(0); bl_state = 2;
                 zpwr_log("dark scr=%d manual=%d", screen_current(), manual);
                 /* screen fully off -> STOP the screensaver. Leaving SCR_SAVER: (a) satisfies "the
@@ -4159,7 +4236,7 @@ int main(int argc, char **argv){
              * queue across the 200ms sleep; we no longer rely on catching an LVGL press-edge. */
             wait = 200;
         } else {
-            uint32_t cap = busy ? 5 : 30;
+            uint32_t cap = busy ? 5 : 12;            /* zune45: 12 ms (was 30) - a tap is seen sooner while the screen is on */
             if(wait > cap) wait = cap;
         }
 #ifdef DISKOS_PROFILE

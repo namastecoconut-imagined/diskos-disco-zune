@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/* Zune lock screen / standby (Figma 02), whatever the saver style: with a track the cover bleeds off the left edge
- * (the Now Playing art block) with the time in the title slot, the date, the song and artist; with nothing loaded a
+/* Zune lock screen / standby (Figma 02), whatever the saver style: with a track the "Metro stack" (zune41) - a huge
+ * thin time, the weekday and the date stacked under it on the left, and a small now-playing row (cover, song, artist,
+ * a hairline of progress) low on the glass; with nothing loaded a
  * type-only clock as big as the glass allows, the weekday and date hugging the curve under it. The battery as "82%"
  * at the top. Redraws once a minute. */
 #include "screens.h"
@@ -14,23 +15,33 @@
 #include <string.h>
 #include <time.h>
 
-LV_FONT_DECLARE(font_zune_light_72) LV_FONT_DECLARE(font_zune_light_150) LV_FONT_DECLARE(font_zune_light_32)
+LV_FONT_DECLARE(font_zune_light_96) LV_FONT_DECLARE(font_zune_light_150) LV_FONT_DECLARE(font_zune_light_32)
+LV_FONT_DECLARE(font_zune_semibold_12) LV_FONT_DECLARE(font_zune_regular_15)
 LV_FONT_DECLARE(font_zune_regular_12) LV_FONT_DECLARE(font_zune_regular_13) LV_FONT_DECLARE(font_zune_regular_17)
 int zhome_battery_pct(void);
 /* light_150 digit box inside the label (measured): top, height, baseline */
 #define ZT_TOP 3
 #define ZT_H 107
 #define ZT_BASE 110
+/* the Metro stack (with music): left edge, the now-playing row, light_96 digit box (top, height) */
+#define ZS_X 44
+#define ZS_ART 44
+#define ZS_ROW_Y 274
+#define ZS_TX (ZS_X + ZS_ART + 12)
+#define ZS_TW 168
+#define ZM_TOP 2
+#define ZM_H 69
 static int zlock_tint(void){ const char *e = getenv("ZLOCK_TINT"); return e ? atoi(e) : simple_cfg_get_int("zlock_tint", 4); }
 
 static struct {
     lv_obj_t *root, *batt, *art, *art_img, *ph;
-    lv_obj_t *mt, *mmer, *mdate, *mtitle, *martist, *hint;    /* with music */
+    lv_obj_t *mt, *mmer, *mday, *mdate, *mtitle, *martist, *hint;    /* with music */
     lv_obj_t *ptrack, *pfill, *ptime;                         /* with music: how far into the song */
     lv_timer_t *ptm;
     lv_obj_t *it, *ic, *im, *imer, *iday, *idate;             /* idle: hours, colon, minutes as three labels (tint) */
-    int have;
-    char t[32];
+    lv_obj_t *dnp, *dwx;                                      /* desk clock (zune45): now playing, the weather */
+    int have, dock;
+    char t[32], wx[64];
 } Z;
 
 static lv_obj_t *lbl(const lv_font_t *f, lv_color_t c){
@@ -51,35 +62,36 @@ static void zprog_tick(lv_timer_t *t){
     char a[16], b[16], l[40]; fmt_ms(a, sizeof a, pos); fmt_ms(b, sizeof b, dur);
     if(dur > 0) snprintf(l, sizeof l, "%s / %s", a, b); else snprintf(l, sizeof l, "%s", a);
     lv_label_set_text(Z.ptime, st.have_track ? l : "");
-    lv_obj_set_width(Z.pfill, dur > 0 ? (int)(132L * pos / dur) : 0);
+    lv_obj_set_width(Z.pfill, dur > 0 ? (int)((long)ZS_TW * pos / dur) : 0);
 }
 void zsaver_create(lv_obj_t *root){
     memset(&Z, 0, sizeof Z);
     Z.root = root;
     lv_obj_set_style_bg_color(root, TC(CANVAS), 0); lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
     Z.batt = lbl(zune_font(&font_zune_regular_12), TC(TEXT_PRIMARY));
-    lv_obj_align(Z.batt, LV_ALIGN_TOP_MID, 0, 24);
+    lv_obj_align(Z.batt, LV_ALIGN_TOP_MID, 0, 24); lv_obj_set_style_text_color(Z.batt, TC(TEXT_MUTED), 0);
     /* with music */
     Z.art = lv_obj_create(root); lv_obj_remove_style_all(Z.art); kit_keep(Z.art);
-    lv_obj_set_size(Z.art, 192, 192); lv_obj_set_pos(Z.art, -46, 48);
+    lv_obj_set_size(Z.art, ZS_ART, ZS_ART); lv_obj_set_pos(Z.art, ZS_X + 2, ZS_ROW_Y);
     lv_obj_set_style_bg_color(Z.art, TC(SURFACE), 0); lv_obj_set_style_bg_opa(Z.art, LV_OPA_COVER, 0);
     lv_obj_remove_flag(Z.art, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    Z.art_img = lv_image_create(Z.art); lv_obj_set_size(Z.art_img, 192, 192); lv_obj_center(Z.art_img);
-    Z.mt = lbl(zune_font(&font_zune_light_72), TC(TEXT_PRIMARY)); lv_obj_set_pos(Z.mt, 162, 46);
-    Z.mmer = lbl(zune_font(&font_zune_regular_13), TC(TEXT_MUTED));
-    Z.mdate = lbl(zune_font(&font_zune_regular_13), TC(TEXT_MUTED)); lv_obj_set_pos(Z.mdate, 168, 134);
-    Z.mtitle = lbl(zune_font(&font_zune_regular_17), TC(TEXT_PRIMARY)); lv_obj_set_pos(Z.mtitle, 168, 174);
-    lv_label_set_long_mode(Z.mtitle, LV_LABEL_LONG_SCROLL_CIRCULAR); lv_obj_set_width(Z.mtitle, 140);
-    Z.martist = lbl(zune_font(&font_zune_regular_13), TC(TEXT_MUTED)); lv_obj_set_pos(Z.martist, 168, 198);
-    lv_label_set_long_mode(Z.martist, LV_LABEL_LONG_SCROLL_CIRCULAR); lv_obj_set_width(Z.martist, 140);
+    Z.art_img = lv_image_create(Z.art); lv_obj_set_size(Z.art_img, ZS_ART, ZS_ART); lv_obj_center(Z.art_img);
+    Z.mt = lbl(&font_zune_light_96, TC(TEXT_PRIMARY)); lv_obj_set_style_text_letter_space(Z.mt, -3, 0);
+    Z.mmer = lbl(zune_font(&font_zune_regular_17), TC(TEXT_MUTED));
+    Z.mday = lbl(zune_font(&font_zune_light_32), TC(TEXT_PRIMARY));
+    Z.mdate = lbl(zune_font(&font_zune_regular_15), TC(TEXT_MUTED));
+    Z.mtitle = lbl(zune_font(&font_zune_semibold_12), TC(TEXT_PRIMARY)); lv_obj_set_pos(Z.mtitle, ZS_TX, ZS_ROW_Y + 2);
+    lv_label_set_long_mode(Z.mtitle, LV_LABEL_LONG_SCROLL_CIRCULAR); lv_obj_set_width(Z.mtitle, ZS_TW);
+    Z.martist = lbl(zune_font(&font_zune_regular_12), TC(TEXT_MUTED)); lv_obj_set_pos(Z.martist, ZS_TX, ZS_ROW_Y + 21);
+    lv_label_set_long_mode(Z.martist, LV_LABEL_LONG_SCROLL_CIRCULAR); lv_obj_set_width(Z.martist, ZS_TW);
     Z.ptrack = lv_obj_create(root); lv_obj_remove_style_all(Z.ptrack); kit_keep(Z.ptrack);
-    lv_obj_set_size(Z.ptrack, 132, 3); lv_obj_set_pos(Z.ptrack, 168, 230);
+    lv_obj_set_size(Z.ptrack, ZS_TW, 2); lv_obj_set_pos(Z.ptrack, ZS_TX, ZS_ROW_Y + ZS_ART - 2);
     lv_obj_set_style_bg_color(Z.ptrack, TC(CONTROL_TRACK), 0); lv_obj_set_style_bg_opa(Z.ptrack, LV_OPA_COVER, 0);
     lv_obj_remove_flag(Z.ptrack, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     Z.pfill = lv_obj_create(Z.ptrack); lv_obj_remove_style_all(Z.pfill); kit_keep(Z.pfill);
-    lv_obj_set_size(Z.pfill, 0, 3); lv_obj_set_style_bg_color(Z.pfill, TC(ACCENT_PRIMARY), 0); lv_obj_set_style_bg_opa(Z.pfill, LV_OPA_COVER, 0);
+    lv_obj_set_size(Z.pfill, 0, 2); lv_obj_set_style_bg_color(Z.pfill, TC(ACCENT_PRIMARY), 0); lv_obj_set_style_bg_opa(Z.pfill, LV_OPA_COVER, 0);
     lv_obj_remove_flag(Z.pfill, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    Z.ptime = lbl(zune_font(&font_zune_regular_12), TC(TEXT_MUTED)); lv_obj_set_pos(Z.ptime, 168, 240);
+    Z.ptime = lbl(zune_font(&font_zune_regular_12), TC(TEXT_MUTED)); lv_obj_add_flag(Z.ptime, LV_OBJ_FLAG_HIDDEN);
     Z.hint = lbl(zune_font(&font_zune_regular_12), TC(TEXT_PRIMARY)); lv_label_set_text(Z.hint, "tap to wake");
     lv_obj_align(Z.hint, LV_ALIGN_TOP_MID, 0, 300);
     /* idle */
@@ -89,15 +101,32 @@ void zsaver_create(lv_obj_t *root){
     Z.imer = lbl(zune_font(&font_zune_regular_17), TC(TEXT_MUTED));
     Z.iday = lbl(zune_font(&font_zune_light_32), TC(TEXT_PRIMARY)); lv_obj_align(Z.iday, LV_ALIGN_TOP_MID, 0, 208);
     Z.idate = lbl(zune_font(&font_zune_regular_17), TC(TEXT_MUTED)); lv_obj_align(Z.idate, LV_ALIGN_TOP_MID, 0, 250);
+    Z.dnp = lbl(zune_font(&font_zune_regular_13), TC(ACCENT_PRIMARY));      /* desk clock: what's playing, above the time */
+    lv_label_set_long_mode(Z.dnp, LV_LABEL_LONG_DOT); lv_obj_set_width(Z.dnp, 230); lv_obj_set_style_text_align(Z.dnp, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(Z.dnp, LV_ALIGN_TOP_MID, 0, 58);
+    Z.dwx = lbl(zune_font(&font_zune_regular_13), TC(TEXT_MUTED));           /* ...and the weather, under the date */
+    zune_sleep_ring(root, 354);
     Z.have = -1;
     if(!Z.ptm) Z.ptm = lv_timer_create(zprog_tick, 1000, NULL);
     zprog_tick(NULL);
 }
 static void layout(void){
-    int m = Z.have > 0 && simple_cfg_get_int("zlock_src", 0) == 0;   /* Clock Only: the big clock even with music */
-    show(Z.art, m); show(Z.mt, m); show(Z.mdate, m); show(Z.mtitle, m); show(Z.martist, m); show(Z.hint, m); show(Z.ptrack, m); show(Z.ptime, m);
+    int m = !Z.dock && Z.have > 0 && simple_cfg_get_int("zlock_src", 0) == 0;   /* Clock Only (and the desk clock): the big clock */
+    show(Z.art, m); show(Z.mt, m); show(Z.mday, m); show(Z.mdate, m); show(Z.mtitle, m); show(Z.martist, m); show(Z.hint, 0); show(Z.ptrack, m); show(Z.ptime, 0);
     show(Z.it, !m); show(Z.ic, !m); show(Z.im, !m); show(Z.iday, !m); show(Z.idate, !m);
     show(Z.mmer, m && lv_label_get_text(Z.mmer)[0]); show(Z.imer, !m && lv_label_get_text(Z.imer)[0]);
+    show(Z.dnp, Z.dock && Z.have > 0); show(Z.dwx, Z.dock && Z.wx[0]);
+}
+/* desk clock (zune45): while the Disc sits on the charger the lock screen stays on, dimmed, as a clock with the date,
+ * the weather, the battery and what's playing (main.c turns it on and off) */
+void zsaver_set_dock(int on){ if(!Z.root || Z.dock == on) return; Z.dock = on; layout(); }
+void zsaver_set_weather(const char *t){
+    if(!Z.root) return;
+    char b[64] = ""; const char *p = t ? t : "";
+    while(*p && (unsigned char)*p >= 0x80) p++;                     /* drop the leading weather glyph (the font has none) */
+    while(*p == ' ') p++;
+    snprintf(b, sizeof b, "%s", p); for(char *c = b; *c; c++) if(*c >= 'A' && *c <= 'Z' && !(c > b && (unsigned char)c[-1] == 0xB0)) *c += 32;   /* keep the C of 18°C */
+    snprintf(Z.wx, sizeof Z.wx, "%s", b); lv_label_set_text(Z.dwx, b); layout();
 }
 void zsaver_set_clock(const char *t){
     if(!Z.root) return;
@@ -136,22 +165,26 @@ void zsaver_set_clock(const char *t){
     int below = iy + (ZT_TOP + ZT_H) * sc / 256;                    /* weekday and date follow the digits */
     lv_obj_align(Z.iday, LV_ALIGN_TOP_MID, 0, below + 24);
     lv_obj_align(Z.idate, LV_ALIGN_TOP_MID, 0, below + 66);
-    /* with music: the time shrinks to stay inside the glass right of the cover */
-    lv_point_t ts; lv_text_get_size(&ts, d, zune_font(&font_zune_light_72), 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-    int troom = 318 - 162 - (mer[0] ? 26 : 0), tsc = ts.x > troom ? 256 * troom / ts.x : 256;
-    lv_obj_set_style_transform_pivot_x(Z.mt, 0, 0); lv_obj_set_style_transform_pivot_y(Z.mt, 0, 0);
-    lv_obj_set_style_transform_scale(Z.mt, tsc, 0);
-    lv_obj_set_pos(Z.mt, 162, 46 + (256 - tsc) * 30 / 256);
-    lv_obj_set_pos(Z.mmer, 162 + ts.x * tsc / 256 + 4, 104);
+    lv_obj_align(Z.dwx, LV_ALIGN_TOP_MID, 0, below + 92);
+    /* with music: the time huge and left, the weekday and date stacked under it (Metro) */
+    lv_point_t ts; lv_text_get_size(&ts, d, &font_zune_light_96, -3, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    int ty = 74 - ZM_TOP;
+    lv_obj_set_pos(Z.mt, ZS_X - 4, ty);
+    lv_obj_set_pos(Z.mmer, ZS_X - 4 + ts.x + 6, ty + ZM_TOP + ZM_H - 18);
+    lv_obj_set_pos(Z.mday, ZS_X, ty + ZM_TOP + ZM_H + 16);
+    lv_obj_set_pos(Z.mdate, ZS_X + 2, ty + ZM_TOP + ZM_H + 60);
     time_t now = time(NULL); struct tm tm; localtime_r(&now, &tm);
     static const char *WD[] = { "sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday" };
     static const char *MO[] = { "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december" };
     char b[48];
-    snprintf(b, sizeof b, "%.3s, %s %d", WD[tm.tm_wday], MO[tm.tm_mon], tm.tm_mday); lv_label_set_text(Z.mdate, b);
+    lv_label_set_text(Z.mday, WD[tm.tm_wday]);
+    snprintf(b, sizeof b, "%s %d", MO[tm.tm_mon], tm.tm_mday); lv_label_set_text(Z.mdate, b);
     lv_label_set_text(Z.iday, WD[tm.tm_wday]);
     snprintf(b, sizeof b, "%s %d", MO[tm.tm_mon], tm.tm_mday); lv_label_set_text(Z.idate, b);
     int p = zhome_battery_pct();
-    if(p >= 0){ snprintf(b, sizeof b, "%d%%", p); lv_label_set_text(Z.batt, b); } else lv_label_set_text(Z.batt, "");
+    int usage_charging(void);
+    if(p >= 0){ if(Z.dock && usage_charging()) snprintf(b, sizeof b, "charging \xC2\xB7 %d%%", p); else snprintf(b, sizeof b, "%d%%", p);
+                lv_label_set_text(Z.batt, b); } else lv_label_set_text(Z.batt, "");
     layout();
     zprog_tick(NULL);
 }
@@ -159,10 +192,12 @@ void zsaver_set_track(const char *title, const char *artist){
     if(!Z.root) return;
     Z.have = title != NULL;
     lv_label_set_text(Z.mtitle, title ? title : "");
+    { char b[200]; snprintf(b, sizeof b, "%s%s%s", title ? title : "", artist && artist[0] ? " \xC2\xB7 " : "", artist ? artist : "");
+      for(char *c = b; *c; c++) if(*c >= 'A' && *c <= 'Z') *c += 32; lv_label_set_text(Z.dnp, b); }
     lv_label_set_text(Z.martist, artist ? artist : "");
     const lv_image_dsc_t *dsc = ui_current_cover_dsc();
     lv_image_set_src(Z.art_img, NULL);
-    if(dsc && dsc->header.w > 0){ lv_image_set_src(Z.art_img, dsc); lv_image_set_scale(Z.art_img, (uint32_t)(256 * 192 / dsc->header.w)); }
+    if(dsc && dsc->header.w > 0){ lv_image_set_src(Z.art_img, dsc); lv_image_set_scale(Z.art_img, (uint32_t)(256 * ZS_ART / dsc->header.w)); }
     layout();
     zprog_tick(NULL);
 }

@@ -609,8 +609,8 @@ void queue_create(lv_obj_t *root){
         const char *lt[2] = { "shuffle", "clear" }; lv_event_cb_t lc[2] = { shuffle_cb, clear_cb };
         for(int k = 0; k < 2; k++){
             lv_obj_t *o = lv_obj_create(root); lv_obj_remove_style_all(o); kit_keep(o);
-            lv_obj_set_size(o, LV_SIZE_CONTENT, 24); lv_obj_align(o, LV_ALIGN_TOP_MID, k ? 38 : -38, 324);
-            lv_obj_add_flag(o, LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE); lv_obj_set_ext_click_area(o, 10);
+            lv_obj_set_size(o, LV_SIZE_CONTENT, 24); lv_obj_align(o, LV_ALIGN_TOP_MID, k ? 40 : -40, 322);
+            lv_obj_add_flag(o, LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE); lv_obj_set_ext_click_area(o, 14);
             lv_obj_set_style_opa(o, LV_OPA_40, LV_STATE_DISABLED);
             lv_obj_t *ic = lv_label_create(o); lv_label_set_text(ic, ""); lv_obj_add_flag(ic, LV_OBJ_FLAG_HIDDEN);
             lv_obj_t *l = lv_label_create(o); lv_label_set_text(l, lt[k]); kit_keep(l);

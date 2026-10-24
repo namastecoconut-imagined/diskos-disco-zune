@@ -61,6 +61,8 @@ static void *save_worker(void *unused){
 static int g_sel = -1, g_mode_freq = 0, g_dirty_draw, g_changed;
 static lv_obj_t *g_root, *g_canvas, *g_hit, *g_rim[NB], *g_pill_lbl, *g_flbl, *g_glbl, *g_minus, *g_plus, *g_modecap, *g_note, *g_lock;
 static uint8_t *g_buf;
+static lv_obj_t *g_zarrow[2];
+static int g_zsel_last = 5;                                     /* Zune: the band in focus comes back next time */
 static lv_timer_t *g_draw_tmr;
 static int g_press_d, g_dragging, g_drag_ok;
 static lv_point_t g_press_pt;                      /* where the touch began (a tap barely moves) */   /* g_drag_ok: this touch began on the ALREADY selected band */
@@ -397,7 +399,7 @@ static void refresh_labels(void){
             lv_obj_set_style_text_font(big, zune_font(&font_zune_light_32), 0); lv_obj_set_style_text_color(big, TC(TEXT_PRIMARY), 0);
             lv_obj_set_style_text_font(small, zune_font(&font_zune_regular_12), 0); lv_obj_set_style_text_color(small, TC(TEXT_MUTED), 0);
             lv_obj_align(big, LV_ALIGN_TOP_MID, 0, 30); lv_obj_align(small, LV_ALIGN_TOP_MID, 0, 72);
-            lv_obj_set_ext_click_area(g_flbl, 10); lv_obj_set_ext_click_area(g_glbl, 10);
+            lv_obj_set_ext_click_area(g_flbl, 16); lv_obj_set_ext_click_area(g_glbl, 14);
         }
         lv_label_set_text(g_modecap, g_mode_freq ? "FREQ" : "GAIN");
     }
@@ -412,7 +414,12 @@ static void refresh_labels(void){
     else lv_obj_add_flag(g_note, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(g_lock, LV_OBJ_FLAG_HIDDEN);   /* no lock glyph in the fonts: the grey + caption say it */
 }
-static void redraw(void){ paint(); refresh_labels(); }
+static void redraw(void){
+    if(th_zune() && g_editable && g_sel < 0) g_sel = g_zsel_last;   /* zune45: a band is always in focus, so - / + work at once */
+    if(th_zune() && g_sel >= 0) g_zsel_last = g_sel;
+    if(th_zune()) for(int k = 0; k < 2; k++) if(g_zarrow[k]){ if(g_editable) lv_obj_remove_flag(g_zarrow[k], LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(g_zarrow[k], LV_OBJ_FLAG_HIDDEN); }
+    paint(); refresh_labels();
+}
 static void draw_tmr_cb(lv_timer_t *t){
     (void)t;
     load_poll();
@@ -481,6 +488,7 @@ static int hit_band(int x, int y, float *dist){
     if(dist) *dist = d;
     return (int)floorf(a / 36.0f + 0.5f) % NB;
 }
+static void zband_go(int dir);
 static void hit_cb(lv_event_t *e){
     lv_event_code_t code = lv_event_get_code(e);
     lv_indev_t *in = lv_indev_active(); if(!in) return;
@@ -500,6 +508,10 @@ static void hit_cb(lv_event_t *e){
         int nt = clampi((int)lroundf((d - R0) / ((RMAX - R0) / 6.0f) * 10.0f), -GMAX, GMAX);
         if(nt != g_t[g_sel]){ g_t[g_sel] = nt; g_changed = 1; g_dirty_draw = 1; }
     } else if(code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST){
+        if(th_zune() && code == LV_EVENT_RELEASED && !g_dragging && g_press_pt.x > 40){   /* zune45: a swipe sideways = the next band */
+            int sdx = p.x - g_press_pt.x, sdy = p.y - g_press_pt.y;
+            if(abs(sdx) > 40 && abs(sdx) > 2 * abs(sdy)){ zband_go(sdx < 0 ? 1 : -1); return; }
+        }
         if(g_dirty_draw){ g_dirty_draw = 0; redraw(); }
         commit();
         /* double-tap a band (two quick taps, no drag): its gain back to 0 dB */
@@ -663,24 +675,47 @@ static lv_obj_t *centre_lbl(lv_obj_t *p, int dy, lv_event_cb_t cb){
 }
 /* Zune (Figma 37): the band's value large at the top and its frequency under it; the profile's name small above;
  * - and + as quiet text below the faders; no pills or rings */
+static void zband_go(int dir){
+    if(!g_editable) return;
+    int b = (g_sel < 0 ? g_zsel_last : g_sel) + dir; b = b < 0 ? NB - 1 : b >= NB ? 0 : b;
+    g_sel = g_zsel_last = b; redraw();
+}
+static void zband_step_cb(lv_event_t *e){ zband_go((int)(intptr_t)lv_event_get_user_data(e)); }
 static void zune_editor_style(lv_obj_t *root, lv_obj_t *pill, lv_obj_t *chev){
     for(uint32_t k = 0; k < lv_obj_get_child_count(root); k++){              /* drop the Disco back button */
         lv_obj_t *o = lv_obj_get_child(root, (int32_t)k);
         if(o != pill && lv_obj_check_type(o, &lv_button_class) && o != g_minus && o != g_plus) lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
     }
     lv_obj_set_style_bg_opa(pill, LV_OPA_TRANSP, 0); lv_obj_set_style_border_width(pill, 0, 0);
-    lv_obj_set_size(pill, 200, 22); lv_obj_align(pill, LV_ALIGN_TOP_MID, 0, 12);
+    lv_obj_set_size(pill, 200, 22); lv_obj_align(pill, LV_ALIGN_TOP_MID, 0, 12); lv_obj_set_ext_click_area(pill, 12);
     lv_obj_set_style_text_font(g_pill_lbl, zune_font(&font_zune_regular_12), 0); lv_obj_set_style_text_color(g_pill_lbl, TC(TEXT_MUTED), 0);
     lv_obj_set_width(g_pill_lbl, 180); lv_obj_center(g_pill_lbl);
     lv_obj_add_flag(chev, LV_OBJ_FLAG_HIDDEN);
     lv_obj_t *pm[2] = { g_minus, g_plus };
-    for(int k = 0; k < 2; k++){
-        lv_obj_set_size(pm[k], 40, 34); lv_obj_align(pm[k], LV_ALIGN_TOP_MID, k ? 46 : -46, 292);
-        lv_obj_set_style_bg_opa(pm[k], LV_OPA_TRANSP, 0); lv_obj_set_style_border_width(pm[k], 0, 0);
+    for(int k = 0; k < 2; k++){                       /* zune45: big round - / + (64 px), easy to hit */
+        lv_obj_set_size(pm[k], 64, 64); lv_obj_align(pm[k], LV_ALIGN_TOP_MID, k ? 66 : -66, 252);
+        lv_obj_set_style_radius(pm[k], LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_opa(pm[k], LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(pm[k], 2, 0); lv_obj_set_style_border_color(pm[k], TC(TEXT_PRIMARY), 0);
+        lv_obj_set_style_border_opa(pm[k], 110, 0);
+        lv_obj_set_style_bg_color(pm[k], TC(ACCENT_PRIMARY), LV_STATE_PRESSED); lv_obj_set_style_bg_opa(pm[k], LV_OPA_COVER, LV_STATE_PRESSED);
+        lv_obj_set_style_border_color(pm[k], TC(ACCENT_PRIMARY), LV_STATE_PRESSED);
+        lv_obj_set_ext_click_area(pm[k], 8);
         lv_obj_t *l = lv_obj_get_child(pm[k], 0);
-        if(l){ lv_obj_set_style_text_font(l, TF(UI_20), 0); lv_obj_set_style_text_color(l, TC(TEXT_PRIMARY), 0); kit_keep(l); }
+        if(l){ lv_obj_set_style_text_font(l, TF(UI_28), 0); lv_obj_set_style_text_color(l, TC(TEXT_PRIMARY), 0); lv_obj_center(l); kit_keep(l); }
         kit_keep(pm[k]);
     }
+    /* zune45: the band in focus steps with the arrows beside the gain, or a swipe across the lower glass */
+    for(int k = 0; k < 2; k++){
+        lv_obj_t *b = lv_button_create(root); lv_obj_remove_style_all(b);
+        lv_obj_set_size(b, 56, 56); lv_obj_align(b, LV_ALIGN_TOP_MID, k ? 112 : -112, 26);
+        lv_obj_t *l = lv_label_create(b); lv_label_set_text(l, k ? LV_SYMBOL_RIGHT : LV_SYMBOL_LEFT);
+        lv_obj_set_style_text_font(l, TF(UI_20), 0); lv_obj_set_style_text_color(l, TC(TEXT_MUTED), 0); lv_obj_center(l);
+        lv_obj_set_style_text_color(l, TC(ACCENT_PRIMARY), LV_STATE_PRESSED);
+        lv_obj_add_event_cb(b, zband_step_cb, LV_EVENT_CLICKED, (void *)(intptr_t)(k ? 1 : -1));
+        kit_keep(b); kit_keep(l); g_zarrow[k] = b;
+    }
+
     for(int i = 0; i < NB; i++){ lv_obj_set_style_text_font(g_rim[i], zune_font(&font_zune_regular_12), 0); kit_keep(g_rim[i]); }
     lv_obj_add_flag(g_modecap, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_style_text_font(g_note, zune_font(&font_zune_regular_14), 0); lv_obj_set_style_text_color(g_note, TC(TEXT_MUTED), 0);

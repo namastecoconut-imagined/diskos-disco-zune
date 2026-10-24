@@ -799,6 +799,7 @@ void modes_output_open(void){
     lv_obj_set_style_bg_color(g_zo, TC(CANVAS), 0); lv_obj_set_style_bg_opa(g_zo, LV_OPA_COVER, 0);
     lv_obj_add_flag(g_zo, LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(g_zo, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(g_zo, zo_bg_cb, LV_EVENT_CLICKED, NULL);
+    zmodal_push(g_zo, zo_close);                                   /* Back closes it; no rim gestures reach the list below */
     static const char *const LB[ZO_N] = { "headphones", "usb-c", "spdif", "bluetooth" };
     int cur = zo_current(), usb = out_usb_card_ok();
     zdial_build(g_zo, LB, ZO_N, cur, zo_pick, 56, "output.zune");
@@ -838,6 +839,7 @@ void modes_usb_poll(void){
         ui_toast(th_zune() ? "usb-c unplugged \xC2\xB7 back to the headphone jack" : "USB DAC unplugged - back to the headphone jack");
     }
 }
+void modes_output_close_test(void){ zo_close(); }   /* host renders */
 void modes_test_route(int r){ out_set_state(r); if(g_zmname) mark_selected(); }   /* host renders */
 
 /* Boot after a USB-C session: the player keeps its USB host route (and its host request) across a restart, so with

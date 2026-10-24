@@ -71,7 +71,7 @@ static void zeq_rename(lv_event_t *e){ (void)e; rename_preset = zdial_focus() + 
 static lv_obj_t *zlink(lv_obj_t *p, const char *t, lv_color_t c, lv_event_cb_t cb){
     lv_obj_t *l = lv_label_create(p); kit_keep(l); lv_label_set_text(l, t);
     lv_obj_set_style_text_font(l, zune_font(&font_zune_regular_14), 0); lv_obj_set_style_text_color(l, c, 0);
-    lv_obj_add_flag(l, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_ext_click_area(l, 12);
+    lv_obj_add_flag(l, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_ext_click_area(l, 16);
     lv_obj_add_event_cb(l, cb, LV_EVENT_CLICKED, NULL); return l;
 }
 static void zeq_build(void){
@@ -100,7 +100,7 @@ static void zeq_build(void){
     lv_obj_set_style_text_color(cap, TC(TEXT_MUTED), 0); lv_obj_align(cap, LV_ALIGN_TOP_MID, 0, 26);
     /* the foot: "equalizer on" + switch, and edit / rename for user profiles */
     lv_obj_t *row = lv_obj_create(root); lv_obj_remove_style_all(row); kit_keep(row);
-    lv_obj_set_size(row, 180, 30); lv_obj_align(row, LV_ALIGN_TOP_MID, 0, 290);
+    lv_obj_set_size(row, 180, 30); lv_obj_align(row, LV_ALIGN_TOP_MID, 0, 290); lv_obj_set_ext_click_area(row, 10);   /* zune46: 50 px tall to hit */
     lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(row, zeq_toggle, LV_EVENT_CLICKED, NULL);
     lv_obj_t *t = lv_label_create(row); kit_keep(t); lv_label_set_text(t, "equalizer on");

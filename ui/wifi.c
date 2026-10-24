@@ -1154,7 +1154,7 @@ void wifi_create(lv_obj_t *root){
     lv_obj_t *rb = lv_button_create(root);
     lv_obj_remove_style_all(rb);
     lv_obj_set_size(rb, 34, 34); lv_obj_align(rb, LV_ALIGN_TOP_MID, -106, 59);
-    lv_obj_set_ext_click_area(rb, 8);
+    lv_obj_set_ext_click_area(rb, 14);
     lv_obj_set_style_radius(rb, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(rb, TC(SURFACE), 0);
     lv_obj_set_style_bg_opa(rb, LV_OPA_COVER, 0);

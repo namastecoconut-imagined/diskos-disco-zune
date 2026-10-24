@@ -27,6 +27,13 @@ const lv_font_t *zune_font(const lv_font_t *base);
 /* the hairline progress ring on the rim (Figma: 352 px, track white 18%, magenta fill from 12 o'clock, 12 px knob).
  * It follows the playing track by itself while screen `scr` is showing. */
 lv_obj_t *zune_rim(lv_obj_t *parent, int scr, int knob);
+/* modal overlays on the top layer (zune45): while one is up the main loop arms no rim scroll / seek under it, and Back
+ * (the edge swipe) closes it instead of leaving the screen underneath. The entry goes away when `o` is deleted. */
+void zmodal_push(lv_obj_t *o, void (*close)(void));
+int  zmodal_active(void);
+int  zmodal_close_top(void);
+/* a hairline on the rim that shrinks as the sleep timer runs out (hidden while no timer is set); d: its diameter */
+lv_obj_t *zune_sleep_ring(lv_obj_t *parent, int d);
 /* pivot header: the title in Light 50, lower case, left at x 75, y 40, running off the right edge; a 36 px round
  * back button left of it, centred on the x-height. back_cb NULL = screen_back(). Returns the title label. */
 lv_obj_t *zune_pivot(lv_obj_t *root, const char *title, lv_event_cb_t back_cb);

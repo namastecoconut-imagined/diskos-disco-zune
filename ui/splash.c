@@ -21,14 +21,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define SP_MS   2600            /* the whole splash */
+#define SP_MS   (th_zune() ? 3800 : 2600)   /* the whole splash (Zune: the mosaic - zune50: held longer so the covers are seen) */
+static lv_obj_t *g_zgrid; static void mosaic_build(void);
 #define CDR     178             /* the disc's radius */
 #define HUBR    54              /* its clear centre */
 #define NRIM    36              /* coloured arcs round the rim */
 
 static struct {
     lv_obj_t *root, *cd, *rim[NRIM], *mark, *hubring, *banner, *dl, *clip, *rest;
-    int frames, dw, ww;         /* the D's width; the whole word's */
+    int frames, dw, ww, early;   /* early: built and drawn by splash_early(), not animating yet */         /* the D's width; the whole word's */
     uint32_t t0;
 } g_sp;
 static uint8_t *g_px;           /* the disc, XRGB8888, made once */
@@ -98,6 +99,7 @@ static int disc_make(uint32_t bg){
 
 /* ---- the timeline ---- */
 static void zframe(float t);
+static void zdone(void);
 static void splash_frame(int ms){
     float t = ms / (float)SP_MS;
     if(th_zune()){ zframe(t); return; }
@@ -144,6 +146,7 @@ static void splash_done(lv_anim_t *a){
     (void)a;
     lv_display_remove_event_cb_with_user_data(lv_display_get_default(), splash_drawn_cb, NULL);
     fprintf(stderr, "splash: %d frames drawn in %u ms\n", g_sp.frames, (unsigned)lv_tick_elaps(g_sp.t0));   /* how smoothly this Disc drew it */
+    if(th_zune()) zdone();
     if(g_sp.root) lv_obj_delete(g_sp.root);
     memset(&g_sp, 0, sizeof g_sp);
     free(g_px); g_px = NULL;
@@ -230,8 +233,10 @@ void splash_cover(void){
 }
 static void cover_off(void){ if(g_cover){ lv_obj_delete(g_cover); g_cover = NULL; } }
 void splash_start(void){
-    if(g_sp.root){ cover_off(); return; }                           /* one splash at a time */
-    if(!build()){ free(g_px); g_px = NULL; cover_off(); return; }   /* no memory for the disc: straight to Home */
+    if(g_sp.root && !g_sp.early){ cover_off(); return; }           /* one splash at a time */
+    if(!g_sp.root && !build()){ free(g_px); g_px = NULL; cover_off(); return; }   /* no memory for the disc: straight to Home */
+    if(g_sp.early && th_zune() && !g_zgrid) mosaic_build();
+    g_sp.early = 0;
     cover_off();                                                    /* the splash's own black takes over from here */
     g_sp.t0 = lv_tick_get();
     lv_display_add_event_cb(lv_display_get_default(), splash_drawn_cb, LV_EVENT_RENDER_READY, NULL);
@@ -245,63 +250,144 @@ void splash_start(void){
     lv_anim_set_completed_cb(&a, splash_done);
     lv_anim_start(&a);
 }
+/* zune49: the splash's first pose, drawn the moment the screen is ready - before the slow start-up work (the screens,
+ * the library, the player connection) - so the glass isn't black for those seconds. splash_start() animates on from it. */
+void splash_early(void){
+    if(!th_zune() || g_sp.root) return;
+    g_sp.early = 1;
+    if(!build()){ g_sp.early = 0; return; }
+    splash_frame(0);
+    lv_obj_invalidate(lv_layer_top());
+    lv_refr_now(NULL);
+}
 /* host renders: the splash standing at `ms` (no animation, nothing deleted) */
 void splash_test_frame(int ms){
     if(!g_sp.root && !build()) return;
     splash_frame(ms);
 }
 
-/* ==== Zune (Figma 01): "disc" in Light 64 with an accent dot, "snowsky" small and spaced under it, a hairline ring on
- * the rim with an accent loader sweeping round it; in, a turn or two, out to Home ==== */
+/* ==== Zune boot splash (zune49): mosaic. "disc" stands dim on black with the rim's hairline from the first frame
+ * (splash_early puts that up before the slow start-up work); then covers from the card - the albums played last,
+ * then the newest - drop into a 5 x 5 grid behind it in a scattered order while the name comes up to white and the
+ * accent fills the rim, and it all fades to Home. ==== */
 LV_FONT_DECLARE(font_zune_light_64) LV_FONT_DECLARE(font_zune_semibold_11) LV_FONT_DECLARE(font_zune_regular_12)
 const lv_font_t *zune_font(const lv_font_t *base);
-static lv_obj_t *g_zword, *g_zdot, *g_zsub, *g_zload;
+#include "zune_thumbs.h"
+#include "musicdb.h"
+#define ZM_T   70                 /* a tile */
+#define ZM_G   4                  /* the gap */
+#define ZM_N   25
+static lv_obj_t *g_zword, *g_zdot, *g_zsub, *g_zload, *g_ztrack, *g_ztile[ZM_N];
+static int g_zwx, g_zwy;
+static int zm_seen(char (*seen)[48], int n, const char *album){ for(int k = 0; k < n; k++) if(!strncmp(seen[k], album, 47)) return 1; return 0; }
+static void mosaic_build(void){
+    int ids[ZM_N], n = 0; char seen[ZM_N][48];
+    int cap = 200; mdb_song_t *r = malloc(sizeof *r * (size_t)cap);       /* played last: their covers are likely cached */
+    if(r){ int k = mdb_recent(r, cap);
+           for(int i = 0; i < k && n < ZM_N; i++) if(r[i].album[0] && !zm_seen(seen, n, r[i].album)){ snprintf(seen[n], 48, "%.47s", r[i].album); ids[n++] = r[i].id; }
+           free(r); }
+    for(int i = mdb_song_count() - 1; i >= 0 && n < ZM_N; i--){          /* then the newest on the card */
+        const mdb_song_t *so = mdb_song(i);
+        if(so && so->album[0] && !zm_seen(seen, n, so->album)){ snprintf(seen[n], 48, "%.47s", so->album); ids[n++] = so->id; }
+    }
+    g_zgrid = plain(g_sp.root); lv_obj_set_size(g_zgrid, 360, 360); lv_obj_set_pos(g_zgrid, 0, 0);
+    const int X0 = (360 - (5 * ZM_T + 4 * ZM_G)) / 2;
+    for(int k = 0; k < ZM_N; k++){
+        lv_obj_t *t = plain(g_zgrid);
+        lv_obj_set_size(t, ZM_T, ZM_T); lv_obj_set_pos(t, X0 + (k % 5) * (ZM_T + ZM_G), X0 + (k / 5) * (ZM_T + ZM_G));
+        lv_obj_set_style_bg_color(t, TC(SURFACE), 0); lv_obj_set_style_bg_opa(t, LV_OPA_COVER, 0);
+        if(getenv("ZSPLASH_FAKE")){ static const uint32_t F[6] = { 0x3a5a78, 0x8a4b2f, 0x2f6b4f, 0x6b2f5f, 0x9a8a3a, 0x40406a };   /* host renders: stand-ins */
+            lv_obj_set_style_bg_color(t, theme_color_from_rgb(F[(k * 5 + k / 5) % 6]), 0); }
+        if(n){ lv_obj_t *img = lv_image_create(t); lv_obj_set_size(img, ZM_T, ZM_T); lv_obj_center(img);
+               lv_obj_add_flag(img, LV_OBJ_FLAG_HIDDEN); zthumb_bind(img, ids[(k * 7) % n], ZM_T); }
+        lv_obj_set_style_opa(t, 0, 0);
+        g_ztile[k] = t;
+    }
+    lv_obj_t *dim = plain(g_zgrid); lv_obj_set_size(dim, 360, 360);           /* the name stays readable on top */
+    lv_obj_set_style_bg_color(dim, TC(CANVAS), 0); lv_obj_set_style_bg_opa(dim, 150, 0);
+    lv_obj_move_to_index(g_zgrid, 0);
+}
 static int zbuild(void){
     g_sp.root = plain(lv_layer_top());
     lv_obj_set_size(g_sp.root, 360, 360);
     lv_obj_set_style_bg_color(g_sp.root, TC(CANVAS), 0); lv_obj_set_style_bg_opa(g_sp.root, LV_OPA_COVER, 0);
     lv_obj_add_flag(g_sp.root, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_t *tr = bare_arc(g_sp.root, 176, 2, TC(CONTROL_TRACK), LV_OPA_COVER);
-    lv_arc_set_bg_angles(tr, 0, 360);
+    if(!g_sp.early) mosaic_build();                  /* early: the library isn't loaded yet - splash_start adds it */
+    g_ztrack = bare_arc(g_sp.root, 176, 2, TC(CONTROL_TRACK), LV_OPA_COVER);
+    lv_arc_set_bg_angles(g_ztrack, 0, 360);
     g_zload = bare_arc(g_sp.root, 176, 3, ui_current_accent(), LV_OPA_COVER);
     lv_obj_set_style_arc_rounded(g_zload, true, LV_PART_MAIN);
-    lv_arc_set_bg_angles(g_zload, 270, 330);
+    lv_arc_set_bg_angles(g_zload, 270, 271);
     g_zword = lv_label_create(g_sp.root); kit_keep(g_zword);
     lv_label_set_text(g_zword, "disc");
     lv_obj_set_style_text_font(g_zword, &font_zune_light_64, 0); lv_obj_set_style_text_color(g_zword, TC(TEXT_PRIMARY), 0);
     lv_obj_update_layout(g_zword);
     int w = lv_obj_get_width(g_zword), h = lv_obj_get_height(g_zword);
-    lv_obj_set_pos(g_zword, 180 - (w + 14) / 2, 174 - h / 2 - 8);
+    g_zwx = 180 - (w + 14) / 2; g_zwy = 174 - h / 2 - 8;
+    lv_obj_set_pos(g_zword, g_zwx, g_zwy);
     g_zdot = plain(g_sp.root);
     lv_obj_set_size(g_zdot, 10, 10); lv_obj_set_style_radius(g_zdot, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(g_zdot, ui_current_accent(), 0); lv_obj_set_style_bg_opa(g_zdot, LV_OPA_COVER, 0);
-    lv_obj_set_pos(g_zdot, 180 - (w + 14) / 2 + w + 4, 174 - h / 2 - 8 + h - 18);
+    lv_obj_set_pos(g_zdot, g_zwx + w + 4, g_zwy + h - 18);
     g_zsub = lv_label_create(g_sp.root); kit_keep(g_zsub);
     lv_label_set_text(g_zsub, "snowsky");
     lv_obj_set_style_text_font(g_zsub, &font_zune_semibold_11, 0); lv_obj_set_style_text_letter_space(g_zsub, 3, 0);
     lv_obj_set_style_text_color(g_zsub, TC(TEXT_MUTED), 0);
     lv_obj_align(g_zsub, LV_ALIGN_TOP_MID, 0, 222);
-    /* which build booted: VERSION from the launcher's run record ("2.6.1-zune27" -> "zune27"), so an update can be confirmed */
-    char ver[48] = "";
-    const char *ev = getenv("ZSPLASH_VER");
-    if(ev) snprintf(ver, sizeof ver, "%s", ev);
-    else { FILE *f = fopen("/tmp/.diskos_run", "r"); char ln[160];
-           if(f){ while(fgets(ln, sizeof ln, f)) if(!strncmp(ln, "VERSION=", 8)){ ln[strcspn(ln, "\r\n")] = 0; snprintf(ver, sizeof ver, "%s", ln + 8); break; } fclose(f); } }
-    if(ver[0] && strcmp(ver, "flashed")){
-        const char *v = strchr(ver, '-'); v = v ? v + 1 : ver;
-        lv_obj_t *vl = lv_label_create(g_sp.root); kit_keep(vl); lv_label_set_text(vl, v);
-        lv_obj_set_style_text_font(vl, zune_font(&font_zune_regular_12), 0); lv_obj_set_style_text_color(vl, TC(TEXT_MUTED), 0);
-        lv_obj_align(vl, LV_ALIGN_TOP_MID, 0, 290);
-    }
     return 1;
 }
 static void zframe(float t){
-    float in = smooth(seg(t, 0, 0.18f));
-    lv_obj_set_style_opa(g_zword, (lv_opa_t)(255 * in), 0);
-    lv_obj_set_style_opa(g_zsub, (lv_opa_t)(255 * smooth(seg(t, 0.1f, 0.3f))), 0);
-    lv_obj_set_style_opa(g_zdot, (lv_opa_t)(255 * smooth(seg(t, 0.22f, 0.32f))), 0);
-    int a = 270 + (int)(720 * ease(t));                                   /* two turns, easing out */
-    int len = 40 + (int)(80 * smooth(seg(t, 0, 0.5f)));
-    lv_arc_set_bg_angles(g_zload, a % 360, (a + len) % 360);
-    lv_obj_set_style_opa(g_sp.root, (lv_opa_t)(255 * (1 - seg(t, 0.9f, 1))), 0);
+    /* 3.8 s: covers drop in over the first ~2 s (~70 ms apart), the name comes up to white early, the grid holds
+     * complete for about a second, and only the last 0.3 s fades to Home. "snowsky" is only a brief caption. */
+    for(int k = 0; k < ZM_N; k++) if(g_ztile[k]){
+        int ord = (k * 11 + 3) % ZM_N;
+        lv_obj_set_style_opa(g_ztile[k], (lv_opa_t)(255 * smooth(seg(t, 0.03f + ord * 0.019f, 0.09f + ord * 0.019f))), 0);
+    }
+    lv_opa_t w = (lv_opa_t)(90 + 165 * smooth(seg(t, 0.08f, 0.22f)));
+    lv_obj_set_style_opa(g_zword, w, 0); lv_obj_set_style_opa(g_zdot, w, 0);
+    lv_obj_set_style_opa(g_zsub, (lv_opa_t)(255 * smooth(seg(t, 0.12f, 0.2f)) * (1 - smooth(seg(t, 0.36f, 0.44f)))), 0);
+    lv_obj_set_style_opa(g_zload, t < 0.02f ? 0 : LV_OPA_COVER, 0);            /* no 1-degree speck before it moves */
+    lv_arc_set_bg_angles(g_zload, 270, 271 + (int)(358 * ease(seg(t, 0.03f, 0.75f))));   /* 629 at most: 630 would wrap to an empty arc */
+    lv_obj_set_style_opa(g_sp.root, (lv_opa_t)(255 * (1 - seg(t, 0.92f, 1))), 0);
 }
+static void zdone(void){
+    g_zword = g_zdot = g_zsub = g_zload = g_ztrack = g_zgrid = NULL;
+    memset(g_ztile, 0, sizeof g_ztile);
+}
+
+/* ==== Zune power-off (zune49): the boot run backwards - the name, "shutting down" under it, and the rim's accent
+ * ring draining anticlockwise while the name dims. Built on the shutdown overlay `o`. ==== */
+static lv_obj_t *g_zoff_arc, *g_zoff_word, *g_zoff_dot;
+static void zoff_exec(void *v, int32_t x){
+    (void)v; if(!g_zoff_arc) return;
+    lv_arc_set_bg_angles(g_zoff_arc, 270, 270 + (x > 1 ? x : 1));
+    lv_opa_t o = (lv_opa_t)(90 + 165 * x / 360);
+    if(g_zoff_word) lv_obj_set_style_opa(g_zoff_word, o, 0);
+    if(g_zoff_dot) lv_obj_set_style_opa(g_zoff_dot, o, 0);
+}
+static void zoff_del(lv_event_t *e){ (void)e; lv_anim_delete(NULL, zoff_exec); g_zoff_arc = g_zoff_word = g_zoff_dot = NULL; }
+void zune_shutdown_build(lv_obj_t *o){
+    lv_obj_t *tr = bare_arc(o, 176, 2, TC(CONTROL_TRACK), LV_OPA_COVER); lv_arc_set_bg_angles(tr, 0, 360);
+    g_zoff_arc = bare_arc(o, 176, 3, ui_current_accent(), LV_OPA_COVER);
+    lv_obj_set_style_arc_rounded(g_zoff_arc, true, LV_PART_MAIN);
+    lv_arc_set_bg_angles(g_zoff_arc, 270, 270 + 359);
+    lv_obj_t *w = lv_label_create(o); kit_keep(w); lv_label_set_text(w, "disc");
+    lv_obj_set_style_text_font(w, &font_zune_light_64, 0); lv_obj_set_style_text_color(w, TC(TEXT_PRIMARY), 0);
+    lv_obj_update_layout(w);
+    int ww = lv_obj_get_width(w), wh = lv_obj_get_height(w), x = 180 - (ww + 14) / 2, y = 174 - wh / 2 - 8;
+    lv_obj_set_pos(w, x, y); g_zoff_word = w;
+    lv_obj_t *d = plain(o); lv_obj_set_size(d, 10, 10); lv_obj_set_style_radius(d, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(d, ui_current_accent(), 0); lv_obj_set_style_bg_opa(d, LV_OPA_COVER, 0);
+    lv_obj_set_pos(d, x + ww + 4, y + wh - 18); g_zoff_dot = d;
+    lv_obj_t *s = lv_label_create(o); kit_keep(s); lv_label_set_text(s, "shutting down");
+    lv_obj_set_style_text_font(s, &font_zune_semibold_11, 0); lv_obj_set_style_text_letter_space(s, 3, 0);
+    lv_obj_set_style_text_color(s, TC(TEXT_MUTED), 0); lv_obj_align(s, LV_ALIGN_TOP_MID, 0, 222);
+    lv_obj_t *k = lv_label_create(o); kit_keep(k); lv_label_set_text(k, "your place is saved");
+    lv_obj_set_style_text_font(k, zune_font(&font_zune_regular_12), 0); lv_obj_set_style_text_color(k, TC(TEXT_MUTED), 0);
+    lv_obj_align(k, LV_ALIGN_TOP_MID, 0, 290);
+    lv_obj_add_event_cb(o, zoff_del, LV_EVENT_DELETE, NULL);
+    lv_anim_t a; lv_anim_init(&a); lv_anim_set_var(&a, g_zoff_arc); lv_anim_set_exec_cb(&a, zoff_exec);
+    lv_anim_set_values(&a, 359, 0); lv_anim_set_duration(&a, 4000); lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
+    lv_anim_start(&a);
+}
+void zune_shutdown_test(int deg){ lv_anim_delete(NULL, zoff_exec); zoff_exec(NULL, deg); }   /* host renders */

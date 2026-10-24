@@ -680,7 +680,7 @@ void saver_set_weather(const char *text)
     if(th_null()){null_saver_weather(text);return;}
     if(th_disco_family()){ dsaver_set_weather(text); return; }
     if(th_braun()){ bsaver_set_weather(text); return; }
-    if(th_zune()) return;
+    if(th_zune()){ void zsaver_set_weather(const char *t); zsaver_set_weather(text); return; }
     snprintf(g_wx_full, sizeof g_wx_full, "%s", text ? text : "");
     weather_apply();
 }

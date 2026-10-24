@@ -75,7 +75,7 @@ static int lib_zalbum(void){ return g_view==VIEW_GROUP && (g_drill_kind==1 || g_
 static int lib_row_h(void){
     if(!th_zune()) return th_null()?60:52;
     if(g_view==VIEW_ALBUMS) return 98;                      /* a row of three 96 px tiles: 102 px pitch */
-    if(lib_zalbum()) return 30;                             /* compact track rows under the album header */
+    if(lib_zalbum()) return 44;                             /* track rows under the album header (zune46: 44, was a 30 px target) */
     return 54;
 }
 static void zrow_two(lv_obj_t *r, const char *top, const char *sub, const char *right, int now);
@@ -1260,6 +1260,7 @@ static void zlinks_fit(lv_obj_t *r, const char *const *lb, const lv_event_cb_t *
         lv_obj_t *o = lv_obj_create(r); lv_obj_remove_style_all(o); kit_keep(o);
         lv_obj_set_size(o, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
         lv_obj_add_flag(o, LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_pad_ver(o, 6, 0); lv_obj_set_style_pad_hor(o, 4, 0);   /* zune46: a 46 px hit (was 34) */
         lv_obj_set_ext_click_area(o, 8);
         lv_obj_set_style_opa(o, LV_OPA_50, LV_STATE_PRESSED);
         lv_obj_t *l = lv_label_create(o); lv_label_set_text(l, lb[k]);
@@ -1940,8 +1941,10 @@ static void library_reload_inner(void){
 
 /* Twelve session-local views, no flash writes on scrolling. Restore after rebuilding
  * and after the virtual spacers exist; explicit track focus takes priority. */
+static uint32_t g_reload_at;                          /* zune45: when the list was last rebuilt */
 static void library_reload(void){
     if(!g_list)return;
+    g_reload_at = lv_tick_get() | 1;
     if(mp_active(&g_mp)) sel_exit();               /* a new or refreshed list: picking ends */
     if(g_position_key[0]){
         int slot=-1;for(int i=0;i<12;i++)if(!strcmp(g_positions[i].key,g_position_key)){slot=i;break;}
@@ -1967,7 +1970,12 @@ void library_set_song_click_cb(library_song_click_cb_t cb){ g_song_cb=cb; }
 
 /* Rebuild the current Library view from the DB - used after an external change
  * (e.g. a playlist deleted from the playlist view) so the list isn't stale. */
-void library_refresh(void){ if(g_list) library_reload(); }
+void library_refresh(void){
+    /* zune45 speed: opening an album / artist builds it, then the screen change asks again - skip a rebuild that was
+     * done a moment ago (each one re-reads the library and re-creates every row) */
+    if(g_reload_at && lv_tick_elaps(g_reload_at) < 400) return;
+    if(g_list) library_reload();
+}
 /* The Artists grouping changed (Settings): an open artist drill's key may not exist in the new grouping, so step back
  * to the Artists list; whatever Library shows is rebuilt from the new keys. */
 void library_artist_mode_changed(void){

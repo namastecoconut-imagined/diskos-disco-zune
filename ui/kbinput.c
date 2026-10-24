@@ -199,11 +199,45 @@ LV_FONT_DECLARE(font_zune_light_28) LV_FONT_DECLARE(font_zune_regular_12) LV_FON
 LV_FONT_DECLARE(font_zune_regular_14) LV_FONT_DECLARE(font_zune_regular_17)
 #define ZK_MAX 32
 static const char *const ZK_SET[4] = {
-    "abcdefghijklmnopqrstuvwxyz-._",
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ-._",
+    "abcdefghijklmnopqrstuvwxyz-._ ",
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ-._ ",
     "0123456789 !\"#$%&'()*+,/:;<=>?",
     "@[\\]^`{|}~" };
-static struct { lv_obj_t *ta, *key[ZK_MAX], *lbl[ZK_MAX], *hit[ZK_MAX], *aa, *aa_l, *mode_l, *show_l; int page, n; } ZK;
+static struct { lv_obj_t *ta, *key[ZK_MAX], *lbl[ZK_MAX], *hit[ZK_MAX], *aa, *aa_l, *mode_l, *show_l, *ring, *pop, *pop_l; int page, n, cur; } ZK;
+/* zune46: the ring types by scrubbing - touch anywhere on the rim, the letter under the finger lights and shows big
+ * just inside the ring, slide to the one you want, let go to type it. The whole slice of the ring is the target, so
+ * the tiny letters no longer need hitting exactly. */
+static void zk_paint(void);
+#define ZK_RIN 108                                     /* the ring zone starts this far from the centre */
+static int zk_key_at(lv_point_t p){
+    int dx = p.x - 180, dy = p.y - 180; if(dx * dx + dy * dy < ZK_RIN * ZK_RIN || ZK.n <= 0) return -1;
+    float a = atan2f((float)dy, (float)dx) * 57.29578f + 90.0f; if(a < 0) a += 360.0f;   /* 0 = 12 o'clock, clockwise */
+    int i = (int)lroundf(a * ZK.n / 360.0f) % ZK.n; return i;
+}
+static void zk_light(int i){
+    if(i == ZK.cur) return;
+    if(ZK.cur >= 0 && ZK.cur < ZK_MAX) lv_obj_set_style_bg_opa(ZK.key[ZK.cur], LV_OPA_TRANSP, 0);
+    ZK.cur = i;
+    if(i < 0){ lv_obj_add_flag(ZK.pop, LV_OBJ_FLAG_HIDDEN); return; }
+    lv_obj_set_style_bg_opa(ZK.key[i], LV_OPA_COVER, 0);
+    char c = ZK_SET[ZK.page][i]; char t[3] = { c, 0, 0 };
+    lv_label_set_text(ZK.pop_l, c == ' ' ? "space" : t);
+    float a = (-90.0f + 360.0f * i / ZK.n) * 0.0174533f;   /* the bubble sits inside the ring, clear of the finger */
+    lv_obj_set_pos(ZK.pop, 180 + (int)lroundf(92 * cosf(a)) - 28, 180 + (int)lroundf(92 * sinf(a)) - 28);
+    lv_obj_remove_flag(ZK.pop, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(ZK.pop);
+}
+static void zk_ring_cb(lv_event_t *e){
+    lv_event_code_t c = lv_event_get_code(e);
+    lv_indev_t *in = lv_indev_active(); if(!in) return; lv_point_t p; lv_indev_get_point(in, &p);
+    if(c == LV_EVENT_PRESSED || c == LV_EVENT_PRESSING){ int i = zk_key_at(p); if(i >= 0 || c == LV_EVENT_PRESSED) zk_light(i); return; }
+    if(c == LV_EVENT_PRESS_LOST){ zk_light(-1); return; }
+    if(c != LV_EVENT_RELEASED) return;
+    int i = ZK.cur; zk_light(-1);
+    if(i < 0 || i >= ZK.n || !ZK.ta) return;
+    char t[2] = { ZK_SET[ZK.page][i], 0 };
+    lv_textarea_add_text(ZK.ta, t);
+    if(ZK.page == 1){ ZK.page = 0; zk_paint(); }                        /* one capital, then small letters again */
+}
 static void zk_paint(void){
     const char *set = ZK_SET[ZK.page]; int n = (int)strlen(set); if(n > ZK_MAX) n = ZK_MAX; ZK.n = n;
     for(int i = 0; i < ZK_MAX; i++){
@@ -216,7 +250,7 @@ static void zk_paint(void){
         lv_obj_set_style_text_font(ZK.lbl[i], zune_font(set[i] == ' ' ? &font_zune_regular_12 : &font_zune_regular_17), 0);
         lv_obj_center(ZK.lbl[i]);
         lv_obj_set_user_data(ZK.hit[i], (void *)(uintptr_t)(unsigned char)set[i]);
-        lv_obj_remove_flag(ZK.key[i], LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(ZK.hit[i], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(ZK.key[i], LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(ZK.hit[i], LV_OBJ_FLAG_HIDDEN);   /* the ring takes the touch */
     }
     lv_label_set_text(ZK.mode_l, ZK.page >= 2 ? "abc" : "123");
     lv_label_set_text(ZK.aa_l, ZK.page >= 2 ? (ZK.page == 2 ? "#+=" : "123") : "Aa");
@@ -266,7 +300,7 @@ static lv_obj_t *zk_disc(lv_obj_t *m, int cx, int cy, lv_color_t bg, lv_event_cb
 static lv_obj_t *zk_text(lv_obj_t *m, const char *t, lv_color_t c, int cx, int y, lv_event_cb_t cb, const char *act){
     lv_obj_t *o = lv_obj_create(m); lv_obj_remove_style_all(o); kit_keep(o);
     lv_obj_set_size(o, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_add_flag(o, LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE); lv_obj_set_ext_click_area(o, 10);
+    lv_obj_add_flag(o, LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE); lv_obj_set_ext_click_area(o, 16);
     lv_obj_set_style_opa(o, LV_OPA_50, LV_STATE_PRESSED);
     lv_obj_t *l = lv_label_create(o); kit_keep(l); lv_label_set_text(l, t);
     lv_obj_set_style_text_font(l, zune_font(&font_zune_regular_14), 0); lv_obj_set_style_text_color(l, c, 0);
@@ -275,7 +309,11 @@ static lv_obj_t *zk_text(lv_obj_t *m, const char *t, lv_color_t c, int cx, int y
     return l;
 }
 void zkb_build(lv_obj_t *m, lv_obj_t *ta, const char *title, int password){
-    memset(&ZK, 0, sizeof ZK); ZK.ta = ta;
+    memset(&ZK, 0, sizeof ZK); ZK.ta = ta; ZK.cur = -1;
+    ZK.ring = lv_obj_create(m); lv_obj_remove_style_all(ZK.ring); kit_keep(ZK.ring);   /* first: under everything else */
+    lv_obj_set_size(ZK.ring, 360, 360); lv_obj_set_pos(ZK.ring, 0, 0);
+    lv_obj_add_flag(ZK.ring, LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(ZK.ring, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(ZK.ring, zk_ring_cb, LV_EVENT_ALL, NULL);
     lv_textarea_set_placeholder_text(ta, "");
     lv_obj_set_size(ta, 200, 44); lv_obj_align(ta, LV_ALIGN_TOP_MID, 0, 116);
     lv_obj_set_style_bg_opa(ta, LV_OPA_TRANSP, 0); lv_obj_set_style_pad_all(ta, 0, 0);
@@ -305,6 +343,13 @@ void zkb_build(lv_obj_t *m, lv_obj_t *ta, const char *title, int password){
         lv_obj_add_event_cb(h, zk_key_cb, LV_EVENT_ALL, NULL);
         ZK.hit[i] = h;
     }
+    ZK.pop = lv_obj_create(m); lv_obj_remove_style_all(ZK.pop); kit_keep(ZK.pop);   /* the letter under the finger, big */
+    lv_obj_set_size(ZK.pop, 56, 56); lv_obj_set_style_radius(ZK.pop, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(ZK.pop, TC(ACCENT_PRIMARY), 0); lv_obj_set_style_bg_opa(ZK.pop, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(ZK.pop, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    ZK.pop_l = lv_label_create(ZK.pop); kit_keep(ZK.pop_l); lv_obj_set_style_text_color(ZK.pop_l, TC(ON_ACCENT), 0);
+    lv_obj_set_style_text_font(ZK.pop_l, zune_font(&font_zune_light_28), 0); lv_obj_center(ZK.pop_l);
+    lv_obj_add_flag(ZK.pop, LV_OBJ_FLAG_HIDDEN);
     ZK.aa = zk_disc(m, 92, 212, TC(SURFACE), zk_aa_cb, "kb.zune.shift", &ZK.aa_l, "Aa");
     zk_disc(m, 140, 212, TC(SURFACE), zk_mode_cb, "kb.zune.mode", &ZK.mode_l, "123");
     lv_obj_t *bk = zk_disc(m, 198, 212, TC(SURFACE), zk_bksp_cb, "kb.zune.backspace", NULL, NULL);

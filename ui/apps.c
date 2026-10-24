@@ -36,21 +36,6 @@ static int g_napps;
 
 static void scan_apps(void){
     g_napps = 0;
-    {   /* Boomshine is built in: always listed, under the id an installed copy used, so old shortcuts keep working */
-        app_t *a = &g_apps[g_napps++];
-        md5_hex("boomshine", 9, a->id);
-        snprintf(a->name, sizeof a->name, "Boomshine"); snprintf(a->exec, sizeof a->exec, "%s", APP_BUILTIN_BOOMSHINE);
-    }
-    if(sphere_ui_enabled()){   /* SongSphere too (since 2.2.0): the add-on's id, so its shortcuts keep working */
-        app_t *a = &g_apps[g_napps++];
-        md5_hex("songsphere", 10, a->id);
-        snprintf(a->name, sizeof a->name, "SongSphere"); snprintf(a->exec, sizeof a->exec, "%s", APP_BUILTIN_SPHERE);
-    }
-    {   /* Album Roulette too (since 2.2.0), under its old folder's id, so shortcuts and pins keep working */
-        app_t *a = &g_apps[g_napps++];
-        md5_hex("album-roulette", 14, a->id);
-        snprintf(a->name, sizeof a->name, "Album Roulette"); snprintf(a->exec, sizeof a->exec, "%s", APP_BUILTIN_ROULETTE);
-    }
     {   /* Listening Stats is built in too */
         app_t *a = &g_apps[g_napps++];
         md5_hex("builtin:stats", 13, a->id);
@@ -103,7 +88,6 @@ static const scdef_t SC[] = {
     { "search",   "Search",     "\xEF\x80\x82", 2 },                               /* 2: font_theme_20 */
     { "battery",  "Battery",    LV_SYMBOL_BATTERY_3, 0 },
     { "info",     "Song Info",  LV_SYMBOL_EYE_OPEN, 0 },
-    { "lastfm",   "Last.fm",    LFM_ICON, 1 },
     { "allapps",  "All apps",   LV_SYMBOL_DRIVE, 0 },
 };
 #define NSCDEF ((int)(sizeof SC / sizeof SC[0]))
@@ -153,7 +137,6 @@ void shortcut_run(const char *key){
     else if(!strcmp(key, "search")) screen_show(SCR_SEARCH);
     else if(!strcmp(key, "battery")) screen_show(SCR_USAGE);
     else if(!strcmp(key, "info")){ songinfo_unpin(); screen_show(SCR_SONGINFO); }
-    else if(!strcmp(key, "lastfm")) lastfm_open();
     else if(!strcmp(key, "allapps")){ g_all = 1; g_page = 0; apps_reload(); }
 }
 /* label + glyph for a key (built-in or app) */
@@ -171,7 +154,6 @@ static void apps_pick(int i){
     int k = (g_all ? g_page * ((th_disco_family() || th_null()) ? 5 : PER_PAGE) : 0) + i;
     if(k < 0 || k >= g_nitems) return;
     switch(g_items[k].kind){
-        case 0: lastfm_open(); break;
         case 1: if(g_items[k].idx >= 0 && g_items[k].idx < g_napps) app_launch(g_apps[g_items[k].idx].exec); break;
         case 2: screen_show(SCR_SETTINGS); break;
         case 3: shortcut_run(g_sckey[g_items[k].idx]); break;
@@ -289,7 +271,6 @@ void apps_reload(void){
         build_page(); return;
     }
     /* All apps: Last.fm, the homebrew apps, Settings */
-    g_items[g_nitems].icon = LFM_ICON; g_items[g_nitems].font = 1; snprintf(g_items[g_nitems].name, sizeof g_items[0].name, "Last.fm"); g_items[g_nitems].kind = 0; g_items[g_nitems].idx = -1; g_nitems++;
     for(int i = 0; i < g_napps && g_nitems < MAX_APPS + 1; i++){
         g_items[g_nitems].icon = LV_SYMBOL_FILE; g_items[g_nitems].font = 1; snprintf(g_items[g_nitems].name, sizeof g_items[0].name, "%.63s", g_apps[i].name);
         g_items[g_nitems].kind = 1; g_items[g_nitems].idx = i; g_nitems++;

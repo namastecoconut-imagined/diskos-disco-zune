@@ -45,14 +45,8 @@ static void add_builtin(const char *key, const char *name, const char *tag, cons
 }
 static void scan(void){
     g_nall = 0;
-    add_builtin("boomshine", "Boomshine", "One tap. A chain reaction.", "Set off a single blast and\ncatch as many dots as you can.",
-                "Play", APP_BUILTIN_BOOMSHINE, "@boom");
     add_builtin("builtin:stats", "Listening Stats", "Your music, in numbers.", "Top artists, albums and songs,\nby week, month or year.",
                 "Show me", APP_BUILTIN_STATS, "@stats");
-    add_builtin("album-roulette", "Album Roulette", "Let chance choose.", "Spin your collection and\nrediscover a favourite.",
-                "I feel lucky!", APP_BUILTIN_ROULETTE, "@vinyl");
-    if(sphere_ui_enabled())
-        add_builtin("songsphere", "SongSphere", "Play music by mood.", "", "", APP_BUILTIN_SPHERE, "@sphere");
     menu_apps_scan();
     for(int i = 0; i < menu_apps_count() && g_nall < MAXA; i++){
         const menu_app_t *m = menu_apps_get(i);
@@ -210,8 +204,6 @@ static void open_cb(lv_event_t *e){
     int i = (int)(intptr_t)lv_event_get_user_data(e);
     if(i < 0 || i >= g_nall) return;
     const shelf_app_t *a = &g_all[i];
-    if(!strcmp(a->exec, APP_BUILTIN_SPHERE)){ sphere_ui_open(); return; }   /* its first page is its landing page */
-    if(!strcmp(a->exec, APP_BUILTIN_ROULETTE)){ screen_show(SCR_ROULETTE); return; }   /* its own vinyl landing page */
     applanding_icon(a->icon);
     applanding_show(a->name, a->tagline, a->about, a->button, a->exec);
 }

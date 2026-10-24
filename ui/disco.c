@@ -139,10 +139,6 @@ static void roulette_icon(lv_obj_t *label, const char *icon, int size){
         }
     }
 }
-/* Boomshine is built into mq_ui: the menu opens its landing page; Play starts it (it owns the screen until you Exit) */
-static void open_boomshine(void){
-    boomshine_landing();
-}
 static const dsec_t SEC[] = {
     { "music",     "Music",     LV_SYMBOL_AUDIO,     SCR_HOME,      NULL,              1 },
     { "library",   "Library",   LV_SYMBOL_LIST,      SCR_LIBRARY,   NULL,              0 },
@@ -160,11 +156,8 @@ static const dsec_t SEC[] = {
     { "myqueue",   "Queue",     LV_SYMBOL_PASTE,     SCR_QUEUE,     open_queue,        0 },
     { "weather",   "Weather",   LV_SYMBOL_IMAGE,     SCR_WEATHER,   weather_app_open,  0 },
     { "ma",        "Sendspin",  "MA",               SCR_MA,       NULL,              0 },
-    { "roulette",  "Album Roulette", IC_ROULETTE,    SCR_ROULETTE, NULL,              0 },
-    { "boomshine", "Boomshine", IC_BOOM,            SCR_APPLAND,   open_boomshine,    0 },
     { "stats",     "Stats",     IC_STATS,           SCR_APPLAND,   stats_landing,     0 },
     { "apps",      "Apps",      IC_APPS,            SCR_APPSHELF,  appshelf_open,     0 },
-    { "songsphere","SongSphere", IC_SPHERE,         SCR_SPHERE,    sphere_ui_open,    0 },
 };
 #define NSEC ((int)(sizeof SEC / sizeof SEC[0]))
 #define MAXM 10                                    /* the picker holds at most ten (the dots must fit) */
@@ -180,7 +173,7 @@ static int menu_has_screen(int scr);
 static int in_menu(int s){ for(int i = 0; i < g_nmenu; i++) if(g_menu[i] == s) return i; return -1; }
 static int menu_has_screen(int scr){ for(int i = 0; i < g_nmenu; i++) if(menu_section(g_menu[i]).screen == scr) return 1; return 0; }
 /* parse cfg "disco_menu": unknown and duplicate ids are skipped, missing protected ones come back (never locked out) */
-static const char CODE[] = "mlsoceFaudbwrgqMRBSAP";                /* one letter per SEC[] entry, same order (digits: apps) */
+static const char CODE[] = "mlsoceFaudbwrgqMSA";   /* (R, B and P were Album Roulette, Boomshine and SongSphere: removed in zune50) */                /* one letter per SEC[] entry, same order (digits: apps) */
 static void menu_load(void){
     menu_apps_scan();
     char buf[256]; snprintf(buf, sizeof buf, "%s", simple_cfg_get_str(th_null()?"null_menu":"disco_menu", "music,library,settings,modes,shortcuts,eq"));
@@ -214,7 +207,7 @@ static lv_image_dsc_t g_bd_dsc;
 static int g_bd_ok;
 static lv_obj_t *g_parent;
 static int no_backdrop(int which){
-    return which == SCR_HOME || which == SCR_NOWPLAYING || which == SCR_SAVER || which == SCR_QUICK || which == SCR_SPHERE;   /* SongSphere: its ball is drawn on the plain canvas */
+    return which == SCR_HOME || which == SCR_NOWPLAYING || which == SCR_SAVER || which == SCR_QUICK;
 }
 static void backdrop_apply(void){
     for(int i = 0; i < SCR_COUNT; i++){
@@ -435,7 +428,7 @@ static int picker_wanted(int which){
     switch(which){
         case SCR_HOME: case SCR_LIBRARY: case SCR_SETTINGS: case SCR_SETLIST: case SCR_WORKMODE: case SCR_APPS:
         case SCR_PLVIEW: case SCR_FOLDER: case SCR_BOOKS: case SCR_ALBUMWALL: case SCR_UPNEXT: case SCR_WIFI:
-        case SCR_ROULETTE: case SCR_BT: case SCR_WEATHER: case SCR_MODEINFO: case SCR_USAGE: case SCR_EQ: case SCR_MA: case SCR_APPLAND: case SCR_APPSHELF: return 1;
+        case SCR_BT: case SCR_WEATHER: case SCR_MODEINFO: case SCR_USAGE: case SCR_EQ: case SCR_MA: case SCR_APPLAND: case SCR_APPSHELF: return 1;
         case SCR_SEARCH: return search_landing_active();             /* the landing page has the menu; the keyboard doesn't */
         default: return 0;
     }

@@ -1136,10 +1136,22 @@ static void info_disc_cb(lv_event_t *e){
 }
 static void info_back_cb(lv_event_t *e){ if(lv_event_get_code(e)==LV_EVENT_CLICKED) screen_back(); }
 
+static lv_obj_t *g_batt_arc;                      /* Zune: the headphones' battery round the rim */
 void bt_info_create(lv_obj_t *root){
     lv_obj_set_style_bg_color(root, TC(CANVAS), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
-    if(th_zune()){ g_info_list = zune_info_page(root, "device", info_back_cb); return; }
+    if(th_zune()){ g_info_list = zune_info_page(root, "device", info_back_cb);
+        /* Figma 75: the headphones' battery as an accent arc round the rim (only when they report one) */
+        g_batt_arc = lv_arc_create(root); kit_keep(g_batt_arc);
+        lv_obj_remove_style(g_batt_arc, NULL, LV_PART_KNOB); lv_obj_remove_flag(g_batt_arc, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_size(g_batt_arc, 352, 352); lv_obj_center(g_batt_arc);
+        lv_arc_set_rotation(g_batt_arc, 270); lv_arc_set_bg_angles(g_batt_arc, 0, 360); lv_arc_set_range(g_batt_arc, 0, 100);
+        lv_obj_set_style_arc_width(g_batt_arc, 3, LV_PART_MAIN); lv_obj_set_style_arc_width(g_batt_arc, 3, LV_PART_INDICATOR);
+        lv_obj_set_style_arc_color(g_batt_arc, TC(CONTROL_TRACK), LV_PART_MAIN);
+        lv_obj_set_style_arc_color(g_batt_arc, TC(ACCENT_PRIMARY), LV_PART_INDICATOR);
+        lv_obj_set_style_arc_rounded(g_batt_arc, false, LV_PART_INDICATOR);
+        lv_obj_add_flag(g_batt_arc, LV_OBJ_FLAG_HIDDEN);
+        return; }
     ui_header_cb(root, "Device", info_back_cb);   /* shared header */
     g_info_list = lv_obj_create(root);
     lv_obj_remove_style_all(g_info_list);
@@ -1178,7 +1190,13 @@ void bt_info_open(void){
     { char v[96];   /* line-anchored property reads: a device NAME can't spoof Connected/Icon */
       info_row("Connected", (bt_info_prop(buf,"Connected:",v,sizeof v) && !strcmp(v,"yes")) ? "Yes" : "No");
       info_row("Paired",    (bt_info_prop(buf,"Paired:",   v,sizeof v) && !strcmp(v,"yes")) ? "Yes" : "No");
-      if(bt_info_prop(buf,"Icon:",v,sizeof v)) info_row("Type", v); }
+      if(bt_info_prop(buf,"Icon:",v,sizeof v)) info_row("Type", v);
+      /* "Battery Percentage: 0x50 (80)" - BlueZ lists it when the headphones report their level */
+      int pct = -1; char *bp = strstr(buf, "Battery Percentage:");
+      if(bp){ char *o = strchr(bp, '('), *nl = strchr(bp, '\n'); if(o && (!nl || o < nl)) pct = atoi(o + 1); }
+      if(pct >= 0 && pct <= 100){ char b[16]; snprintf(b, sizeof b, "%d%%", pct); info_row("Battery", b); }
+      if(g_batt_arc){ if(pct >= 0 && pct <= 100){ lv_arc_set_value(g_batt_arc, pct); lv_obj_remove_flag(g_batt_arc, LV_OBJ_FLAG_HIDDEN); }
+                      else lv_obj_add_flag(g_batt_arc, LV_OBJ_FLAG_HIDDEN); } }
     info_row("Audio", "On (beta)");   /* routing works; SBC over this CPU can be rough. short: value label is 142px */
     if(th_zune()) info_action_row("disconnect", info_disc_cb);        /* Zune: no separate button under the list */
     info_action_row(th_zune() ? "forget" : "Forget This Device", info_forget_cb);   /* C13: unpair + untrust */
@@ -1620,7 +1638,7 @@ void bt_create(lv_obj_t *root){
     lv_obj_t *rb = lv_button_create(root);
     lv_obj_remove_style_all(rb);
     lv_obj_set_size(rb, 34, 34); lv_obj_align(rb, LV_ALIGN_TOP_MID, -106, 59);
-    lv_obj_set_ext_click_area(rb, 8);
+    lv_obj_set_ext_click_area(rb, 14);
     lv_obj_set_style_radius(rb, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(rb, TC(SURFACE), 0);
     lv_obj_set_style_bg_opa(rb, LV_OPA_COVER, 0);

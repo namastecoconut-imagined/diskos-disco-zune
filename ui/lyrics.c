@@ -292,7 +292,7 @@ static void start_fetch(void)
 
 /* ---- Zune (Figma 12 + 67): the line being sung, huge and centred, the next one small under it; untimed lyrics as an
  * even list under "LYRICS · NOT SYNCED"; no lyrics as one quiet line and a hint. The rim keeps the track progress. ---- */
-static lv_obj_t *g_zcur, *g_znext, *g_zbig, *g_zhint, *g_ztop;
+static lv_obj_t *g_zcur, *g_znext, *g_zprev, *g_zbig, *g_zhint, *g_ztop;
 static int g_zcur_i = -3;
 static void z_show(lv_obj_t *o, int on){ if(o){ if(on) lv_obj_remove_flag(o, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN); } }
 static void z_top(const char *t, int caps){
@@ -302,7 +302,7 @@ static void z_top(const char *t, int caps){
     lv_obj_set_style_text_letter_space(g_ztop, caps ? 2 : 0, 0);
 }
 static void z_message(const char *big, const char *hint){        /* no lyrics, nothing playing, still looking */
-    z_show(g_scroll, 0); z_show(g_zcur, 0); z_show(g_znext, 0);
+    z_show(g_scroll, 0); z_show(g_zcur, 0); z_show(g_znext, 0); z_show(g_zprev, 0);
     z_show(g_zbig, 1); z_show(g_zhint, hint && hint[0]);
     lv_label_set_text(g_zbig, big); if(hint) lv_label_set_text(g_zhint, hint);
     z_top(g_identity_title[0] ? g_identity_title : "", 0);
@@ -316,11 +316,13 @@ static void z_message_for(const char *txt){                       /* the stock s
     else                                  z_message("lyrics", "checking the sd card\xE2\x80\xA6");
 }
 static void z_plain(const char *txt){                             /* untimed: the whole text as one even list */
-    z_show(g_zbig, 0); z_show(g_zhint, 0); z_show(g_zcur, 0); z_show(g_znext, 0); z_show(g_scroll, 1);
+    z_show(g_zbig, 0); z_show(g_zhint, 0); z_show(g_zcur, 0); z_show(g_znext, 0); z_show(g_zprev, 0); z_show(g_scroll, 1);
     if(g_text){ lv_obj_remove_flag(g_text, LV_OBJ_FLAG_HIDDEN); lv_label_set_text(g_text, txt); }
     if(g_scroll) lv_obj_scroll_to_y(g_scroll, 0, LV_ANIM_OFF);
     z_top("LYRICS \xC2\xB7 NOT SYNCED", 1);
 }
+lv_color_t ui_media_accent(void);
+static void z_opa_cb(void *o, int32_t v){ lv_obj_set_style_opa((lv_obj_t *)o, (lv_opa_t)v, 0); }
 static void z_timed_paint(int idx){                               /* the current line and the next */
     if(!g_zcur || idx == g_zcur_i) return;
     g_zcur_i = idx;
@@ -331,12 +333,20 @@ static void z_timed_paint(int idx){                               /* the current
     const lv_font_t *big = zune_font(&font_zune_light_40);
     lv_point_t sz; lv_text_get_size(&sz, cur, big, -1, 0, 270, LV_TEXT_FLAG_NONE);
     if(sz.y > 2 * lv_font_get_line_height(big)) big = zune_font(&font_zune_light_32);   /* a long line: one size down */
+    const char *prv = (idx - 1 >= 0 && idx - 1 < g_nll) ? g_ltext + g_ll[idx - 1].text : "";
     lv_obj_set_style_text_font(g_zcur, big, 0);
+    lv_obj_set_style_text_color(g_zcur, ui_media_accent(), 0);    /* the line being sung: in the accent */
     lv_label_set_text(g_zcur, cur);
     lv_label_set_text(g_znext, nxt);
+    if(g_zprev) lv_label_set_text(g_zprev, prv);
     lv_obj_update_layout(g_zcur);
-    lv_obj_align(g_zcur, LV_ALIGN_CENTER, 0, -14);
+    lv_obj_align(g_zcur, LV_ALIGN_CENTER, 0, -6);
     lv_obj_align_to(g_znext, g_zcur, LV_ALIGN_OUT_BOTTOM_MID, 0, 16);
+    if(g_zprev) lv_obj_align_to(g_zprev, g_zcur, LV_ALIGN_OUT_TOP_MID, 0, -14);
+    if(idx >= 0){                                                  /* a new line fades in */
+        lv_anim_t a; lv_anim_init(&a); lv_anim_set_var(&a, g_zcur); lv_anim_set_values(&a, 60, 255);
+        lv_anim_set_duration(&a, 260); lv_anim_set_exec_cb(&a, z_opa_cb); lv_anim_start(&a);
+    }
 }
 
 /* block-text mode: one label (status messages, untimed lyrics) */
@@ -363,7 +373,7 @@ static int show_timed(const char *lrc)
     }
     if(th_zune()){                                     /* Zune: two labels follow the position instead of a list */
         g_nll = n; g_lcur = -2; g_zcur_i = -3; g_holding = 0;
-        z_show(g_scroll, 0); z_show(g_zbig, 0); z_show(g_zhint, 0); z_show(g_zcur, 1); z_show(g_znext, 1);
+        z_show(g_scroll, 0); z_show(g_zbig, 0); z_show(g_zhint, 0); z_show(g_zcur, 1); z_show(g_znext, 1); z_show(g_zprev, 1);
         z_top("", 0); z_timed_paint(-1);
         return 1;
     }
@@ -587,6 +597,10 @@ void lyrics_create(lv_obj_t *root)
         lv_obj_set_width(g_znext, 280); lv_label_set_long_mode(g_znext, LV_LABEL_LONG_DOT);
         lv_obj_set_style_text_align(g_znext, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_font(g_znext, zune_font(TF(UI_14)), 0); lv_obj_set_style_text_color(g_znext, TC(TEXT_MUTED), 0);
+        g_zprev = lv_label_create(root); lv_label_set_text(g_zprev, "");          /* the line just sung, faint above */
+        lv_obj_set_width(g_zprev, 260); lv_label_set_long_mode(g_zprev, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_align(g_zprev, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_font(g_zprev, zune_font(TF(UI_14)), 0); lv_obj_set_style_text_color(g_zprev, TC(TEXT_DISABLED), 0);
         g_zbig = lv_label_create(root); lv_label_set_text(g_zbig, "");
         lv_obj_set_style_text_font(g_zbig, zune_font(&font_zune_light_32), 0); lv_obj_set_style_text_color(g_zbig, TC(TEXT_PRIMARY), 0);
         lv_obj_align(g_zbig, LV_ALIGN_TOP_MID, 0, 138);
@@ -595,8 +609,8 @@ void lyrics_create(lv_obj_t *root)
         lv_obj_set_style_text_align(g_zhint, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_font(g_zhint, TF(UI_12), 0); lv_obj_set_style_text_color(g_zhint, TC(TEXT_MUTED), 0);
         lv_obj_align(g_zhint, LV_ALIGN_TOP_MID, 0, 188);
-        z_show(g_zcur, 0); z_show(g_znext, 0); z_show(g_scroll, 0);
-        lv_obj_t *own[] = { g_scroll, g_text, g_ztop, g_zcur, g_znext, g_zbig, g_zhint };
+        z_show(g_zcur, 0); z_show(g_znext, 0); z_show(g_zprev, 0); z_show(g_scroll, 0);
+        lv_obj_t *own[] = { g_scroll, g_text, g_ztop, g_zcur, g_znext, g_zprev, g_zbig, g_zhint };
         for(unsigned i = 0; i < sizeof own / sizeof own[0]; i++) kit_keep(own[i]);
     }
 }

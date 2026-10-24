@@ -208,7 +208,7 @@ static void zcp_create(lv_obj_t *root){
         lv_obj_set_style_text_font(t, TF(UI_14), 0); lv_obj_set_style_text_color(t, TC(FIXED_MEDIA_WHITE), 0); lv_obj_center(t);
         lv_obj_t *h = lv_obj_create(root); lv_obj_remove_style_all(h); kit_keep(h);   /* a small target, a wide hit area */
         lv_obj_set_size(h, 20, 20); lv_obj_set_pos(h, cx - 10, cy - 10);
-        lv_obj_add_flag(h, LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(h, LV_OBJ_FLAG_SCROLLABLE); lv_obj_set_ext_click_area(h, 10);
+        lv_obj_add_flag(h, LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(h, LV_OBJ_FLAG_SCROLLABLE); lv_obj_set_ext_click_area(h, 16);   /* zune46: 52 px */
         lv_obj_add_event_cb(h, zswatch_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
     }
     lv_obj_t *cap = lv_label_create(root); kit_keep(cap); lv_label_set_text(cap, "ACCENT COLOUR");
@@ -238,7 +238,7 @@ static void zcp_create(lv_obj_t *root){
     lv_obj_add_event_cb(g_zapply, zapply_cb, LV_EVENT_CLICKED, NULL);
     g_zart_l = lv_label_create(root); kit_keep(g_zart_l);                        /* Figma 77: "from album art" */
     lv_obj_set_style_text_font(g_zart_l, zune_font(&font_zune_regular_13), 0); lv_obj_align(g_zart_l, LV_ALIGN_TOP_MID, 0, 268);
-    lv_obj_add_flag(g_zart_l, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_ext_click_area(g_zart_l, 12);
+    lv_obj_add_flag(g_zart_l, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_ext_click_area(g_zart_l, 16);
     lv_obj_add_event_cb(g_zart_l, zart_cb, LV_EVENT_CLICKED, NULL);
     zcp_open();
 }

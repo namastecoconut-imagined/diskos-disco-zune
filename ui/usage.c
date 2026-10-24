@@ -450,7 +450,7 @@ static void zusage_create(lv_obj_t *root){
     lv_obj_set_style_text_color(g_pct, TC(TEXT_PRIMARY), 0);
     g_zu_l1 = zu_lab(root, &font_zune_regular_14, TC(TEXT_SECONDARY), 184);
     g_zu_l2 = zu_lab(root, &font_zune_regular_12, TC(TEXT_MUTED), 218);
-    lv_obj_add_flag(g_zu_l2, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_ext_click_area(g_zu_l2, 12);   /* hold: restart the totals */
+    lv_obj_add_flag(g_zu_l2, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_ext_click_area(g_zu_l2, 18);   /* hold: restart the totals */
     lv_obj_add_event_cb(g_zu_l2, zu_cap_hold_cb, LV_EVENT_LONG_PRESSED, NULL);
     g_zu_l3 = zu_lab(root, &font_zune_regular_13, TC(TEXT_PRIMARY), 236);
     g_zu_lim = zu_lab(root, &font_zune_regular_12, TC(TEXT_MUTED), 276); lv_label_set_text(g_zu_lim, "charge limit 80%");

@@ -80,7 +80,7 @@ void tagfix_current_album(void);      /* NP menu: the same for every track of it
 void tagfix_auto_tick(const track_state_t *st, int playing);   /* Auto-tag (Settings > Playback) */
 void ui_np_tags_changed(void);        /* tags were rewritten: lyrics views reload */
 #include <stdbool.h>
-enum { SCR_HOME, SCR_LIBRARY, SCR_NOWPLAYING, SCR_SETTINGS, SCR_SETTING_DETAIL, SCR_SEARCH, SCR_SAVER, SCR_QUICK, SCR_SONGINFO, SCR_NPMENU, SCR_TUNE, SCR_EQ, SCR_APPS, SCR_NPHUB, SCR_PLPICK, SCR_PLVIEW, SCR_WIFI, SCR_WIFI_INFO, SCR_BT, SCR_BT_INFO, SCR_WEATHER, SCR_LYRICS, SCR_COLORPICK, SCR_LASTFM, SCR_WORKMODE, SCR_DEBUG, SCR_FOLDER, SCR_BOOKS, SCR_CHAPTERS, SCR_SETLIST, SCR_QSCONFIG, SCR_ALBUMWALL, SCR_USAGE, SCR_QUEUE, SCR_SCCONFIG, SCR_MODEINFO, SCR_UPNEXT, SCR_DATETIME, SCR_EQ_EDITOR, SCR_MA, SCR_ROULETTE, SCR_APPLAND, SCR_STATS, SCR_APPSHELF, SCR_APPPICK, SCR_SPHERE, SCR_ROULETTE_SPIN, SCR_COUNT };
+enum { SCR_HOME, SCR_LIBRARY, SCR_NOWPLAYING, SCR_SETTINGS, SCR_SETTING_DETAIL, SCR_SEARCH, SCR_SAVER, SCR_QUICK, SCR_SONGINFO, SCR_NPMENU, SCR_TUNE, SCR_EQ, SCR_APPS, SCR_NPHUB, SCR_PLPICK, SCR_PLVIEW, SCR_WIFI, SCR_WIFI_INFO, SCR_BT, SCR_BT_INFO, SCR_WEATHER, SCR_LYRICS, SCR_COLORPICK, SCR_WORKMODE, SCR_DEBUG, SCR_FOLDER, SCR_BOOKS, SCR_CHAPTERS, SCR_SETLIST, SCR_QSCONFIG, SCR_ALBUMWALL, SCR_USAGE, SCR_QUEUE, SCR_SCCONFIG, SCR_MODEINFO, SCR_UPNEXT, SCR_DATETIME, SCR_EQ_EDITOR, SCR_MA, SCR_APPLAND, SCR_STATS, SCR_APPSHELF, SCR_APPPICK, SCR_QUICKPLAY, SCR_COUNT };
 void screens_init(void);
 void screen_show(int which);
 void screen_back(void);
@@ -179,10 +179,8 @@ void wifi_create(lv_obj_t *root);
 void wifi_open(void);
 int  wifi_toggle(void);        /* Quick Settings tile short-press: flip radio + persist, returns new state */
 int  wifi_radio_live(void);   /* Wi-Fi radio really on (wpa_supplicant running) */
-void lastfm_open(void);                   /* Settings -> Last.fm (SCR_LASTFM) */
 void debug_open(void);                     /* Settings -> System -> Debug Mode (SCR_DEBUG) */
 void debug_create(lv_obj_t *root);
-void lastfm_create(lv_obj_t *parent);
 void wifi_init_intent(void);   /* seed wifi_on intent from stock WIFI_STATUS (first run only) */
 void wifi_supervise(void);     /* keepalive: (re)start supplicant if Wi-Fi should be on but isn't */
 void wifi_info_create(lv_obj_t *root);
@@ -227,12 +225,9 @@ void apps_create(lv_obj_t *root);
 void apps_reload(void);
 void app_launch(const char *exec);
 void app_launch_direct(const char *exec); /* landing-page confirmation only */
-/* App landing page (roulette.c): Boomshine's, or one made from an installed app's app.conf */
+/* App landing page (roulette.c): Listening Stats', or one made from an installed app's app.conf */
 void applanding_create(lv_obj_t *root);
 void applanding_show(const char *name, const char *tagline, const char *about, const char *button, const char *exec);
-void boomshine_landing(void);
-#define APP_BUILTIN_BOOMSHINE "builtin:boomshine"   /* app_launch() target for the game built into mq_ui */
-#define APP_BUILTIN_SPHERE "builtin:songsphere"     /* SongSphere: built in since 2.2.0 (sphere_ui.c) */
 #define APP_BUILTIN_STATS "builtin:stats"           /* Listening Stats: a screen of mq_ui, opened from its landing page */
 void stats_create(lv_obj_t *root);
 void stats_open(void);                              /* read the numbers, then show them (the landing page's button) */
@@ -247,17 +242,6 @@ lv_obj_t *appshelf_scroller(void);
 lv_image_dsc_t *app_icon_load(const char *bmp_path, int size);   /* appshelf.c: a BMP icon in RAM at size x size (free() it) */
 void applanding_icon(const char *bmp_path);  /* the next applanding_show() draws this picture ("" / NULL: none) */
 int  stats_back_consumed(void);
-/* SongSphere, built in (sphere_ui.c). kind: 0 song (key = path), 1 album (album name), 2 artist */
-void sphere_ui_create(lv_obj_t *root);
-void sphere_ui_open(void);
-void sphere_ui_tag(int kind, const char *key, const char *name);
-int  sphere_ui_enabled(void);                /* Settings > Playback > SongSphere */
-int  sphere_ui_back_consumed(void);
-int  sphere_ui_owns_point(int x, int y);
-int  sphere_ui_song_spot(const char *path, const char *album, const char *artist, float *x, float *y);   /* 1 own, 2 album, 3 artist */
-const char *sphere_ui_mood_name(float x, float y);
-lv_color_t sphere_ui_mood_colour(float x, float y);
-void sphere_ui_test(int page, float x, float y);   /* host renders */
 void ui_app_play_ids(int *ids, int n, int shuffle, const char *name, int play, int save);   /* main.c: play / keep SONG ids (takes ids) */                      /* Back closes its Wrapped / top-15 view first */
 void stats_test_sub(int k); void stats_test_wrap(int k, int page);   /* host renders */
 /* settings (master list + drill-in detail) */
@@ -413,6 +397,7 @@ void ui_imm_control_cancel(void);
 int ui_imm_volume_mode(void);
 void ui_seek_preview(long position,long duration,int on);
 int ui_seek_preview_active(void);
+void zune_guide_open(void); void zune_guide_preview(int i);                  /* zune47: the gesture guide */
 void ui_show_volume(int vol);      /* show the on-screen volume bar (auto-hides) */
 /* home */
 void home_create(lv_obj_t *root);
@@ -504,8 +489,3 @@ void albumwall_visible(int visible);
 
 #endif
 
-void roulette_create(lv_obj_t *root);
-/* Album Roulette, built in (2.2.0): the spin behind the vinyl landing page (roulette_spin.c, roulette_backend.c) */
-#define APP_BUILTIN_ROULETTE "builtin:roulette"
-void roulette_spin_create(lv_obj_t *root);
-void roulette_spin_open(void);              /* a fresh sample, the wheel while covers are prepared, then the spin */

@@ -350,6 +350,8 @@ static void apply_ma_name(int v){ (void)v; ma_edit_name(); }
 
 static void apply_workmode(int v){ (void)v; modes_open(); }
 #include "modes.h"
+void zhome_bg_apply(void);
+static void apply_zhome_bg(int v){ (void)v; zhome_bg_apply(); }
 static void apply_output(int v){ (void)v; if(th_zune()) modes_output_open(); }   /* Zune: Figma 81 output dial */  /* opens SCR_WORKMODE (source-mode picker) */
 static void apply_eq_custom(int v){ (void)v; screen_show(SCR_EQ); }  /* opens Custom EQ */
 static void apply_disco_menu(int v){ (void)v; disco_menu_open(); }     /* fork: Disco theme only */
@@ -390,6 +392,7 @@ static void apply_grp_controls(int v);
 static void apply_grp_maintenance(int v);
 static void apply_grp_about(int v);
 static void apply_howto(int v);
+static void apply_zguide(int v){ (void)v; if(th_zune()) zune_guide_open(); else ui_toast("The gesture guide belongs to the Zune theme"); }
 static void apply_hints(int v){(void)v;onboarding_mode_changed();}
 static void apply_hints_reset(int v){(void)v;ui_toast(onboarding_reset()<0?"Couldn't save settings":"Hints reset");}
 static const char *OPT_HINTS[]={"Automatic","On","Off"};
@@ -723,6 +726,22 @@ static const char *const OPT_AUTOTAG[] = { "Off", "On" };
 static const char *const OPT_REPLAYGAIN[] = { "Off", "Track", "Album" };
 static const char *const OPT_GAIN[]   = { "Low", "High" };
 static const char *const OPT_DFILTER[]= { "Fast LL","Slow LL","Slow PC","Fast PC","NOS","Wideband" };
+/* zune45: what each audio choice does, shown under it in the picker */
+static const char *const OPT_GAIN_D[] = { "For earbuds and sensitive IEMs: quieter, with a lower noise floor.",
+                                          "More drive for big or hard-to-power headphones." };
+static const char *const OPT_DFILTER_D[] = { "Sharp roll-off, minimum phase: no pre-ringing. LL = low latency.",
+                                             "Gentle roll-off, minimum phase: a slightly softer top end.",
+                                             "Gentle roll-off, linear phase (PC = phase compensated).",
+                                             "Sharp roll-off, linear phase: the textbook flat response.",
+                                             "No oversampling filter: rolled-off highs, an analogue feel.",
+                                             "Flat further up the range, for hi-res files." };
+static const char *const OPT_RG_D[] = { "Every track at the level it was mastered at.",
+                                        "Evens out loudness from song to song: best for shuffle.",
+                                        "Evens out whole albums, keeping the quiet and loud parts within one." };
+static const char *const OPT_DRE_D[] = { "Standard output.",
+                                         "Lowers background hiss at low volumes (the DAC's dynamic range enhancement)." };
+static const char *const OPT_GAPLESS_D[] = { "A short silence between tracks.",
+                                             "Live albums and DJ mixes flow on with no gap." };
 static const char *const OPT_MEMORY[] = { "Off", "Position", "Song" };
 static const char *const OPT_ARTISTCLASS[] = { "By Artist", "By Album Artist" };
 static const char *const OPT_ROTATION[] = { "Normal", "Turn 90", "Turn 180", "Turn 270" };   /* stock values 0..3 */
@@ -754,6 +773,8 @@ static const setting_t TABLE[] = {
       "How the player advances through tracks.", D_MODE },
     { "Playback", "Equalizer",   ST_CYCLER, "eq_preset", 0,0,0, OPT_EQ,  21, NULL, apply_eq,   0,
       "Tone preset sent to the player; audible effect is still being verified.", NULL },
+    { "Playback", "Resume Last Song", ST_TOGGLE, "boot_resume", 0,1,1, NULL,0, NULL, NULL, 0,
+      "Off: the Disc starts with nothing playing and an empty queue. On: the last song is loaded, ready to play.", NULL },
     { "Playback", "Up Next", ST_TOGGLE, "up_next", 0,1,0, NULL,0, NULL, apply_upnext, 0,
       "Up Next sits beside Home favourites. Hold Queue for Up Next; tap for the editable queue.", NULL },
     { "Playback", "Auto-tag",    ST_CYCLER, "autotag", 0,0,0, OPT_AUTOTAG, 2, NULL, apply_autotag, 0,
@@ -766,8 +787,6 @@ static const setting_t TABLE[] = {
       "On startup: Off starts fresh; Position resumes the spot; Song resumes the track.", NULL },
     { "Playback", "Artists",     ST_CYCLER, "artist_class", 0,0,0, OPT_ARTISTCLASS, 2, NULL, apply_artist_class, 0,
       "Group Artists by song artist or album artist, matching the stock player.", NULL },
-    { "Playback", "SongSphere", ST_TOGGLE, "songsphere", 0,1,1, NULL, 0, NULL, NULL, 1,
-      "Assign moods to albums, artists or songs. Off hides SongSphere and Mood actions.", NULL },
     { "Playback", "Play Through Folders", ST_TOGGLE, "folder_jump", 0,1,1, NULL, 0, NULL, apply_folder_jump, 0,
       "Continue to the next album, artist, genre or folder. Works in Sequential, Shuffle and Loop All.", NULL },
     /* Audio/DAC cluster - cyclers with min=-1 so they can read "System default" (unmanaged):
@@ -777,15 +796,15 @@ static const setting_t TABLE[] = {
     { "Audio",    "Output",      ST_ACTION, NULL, 0,0,0, NULL,0, LV_SYMBOL_RIGHT, apply_output, 0,
       "Where the sound goes: the headphone jack, a USB-C DAC or headphones, SPDIF, or Bluetooth.", NULL },
     { "Audio",    "Gain",        ST_CYCLER, "audio_gain",   0,0,0, OPT_GAIN, 2, NULL, apply_gain, 0,
-      "Headphone output gain. High drives demanding headphones louder.", NULL },
+      "Headphone output gain. High drives demanding headphones louder.", OPT_GAIN_D },
     { "Audio",    "DAC Filter",  ST_CYCLER, "audio_filter", 0,0,0, OPT_DFILTER, 6, NULL, apply_dac_filter, 1,
-      "CS43131 digital filter roll-off. A subtle tone/transient tradeoff.", NULL },
+      "CS43131 digital filter roll-off. A subtle tone/transient tradeoff.", OPT_DFILTER_D },
     { "Audio",    "ReplayGain",  ST_CYCLER, "replay_gain",  0,0,0, OPT_REPLAYGAIN, 3, NULL, apply_replay_gain, 0,
-      "Match loudness by track, or by album while preserving relative track levels.", NULL },
+      "Match loudness by track, or by album while preserving relative track levels.", OPT_RG_D },
     { "Audio",    "DRE",         ST_CYCLER, "audio_dre",    0,0,0, OPT_DRE, 2, NULL, apply_dre, 1,
-      "Dynamic Range Enhancement (CS43131) for quieter listening.", NULL },
+      "Dynamic Range Enhancement (CS43131) for quieter listening.", OPT_DRE_D },
     { "Audio",    "Gapless",     ST_CYCLER, "gapless",      0,0,0, OPT_DRE, 2, NULL, apply_gapless, 0,
-      "Play tracks with no silent gap between them.", NULL },
+      "Play tracks with no silent gap between them.", OPT_GAPLESS_D },
     { "Audio",    "Max Volume",  ST_SLIDER, "max_vol",      10,120,5, NULL,0, NULL, apply_maxvol, 120,
       "Cap the maximum volume level (protects your ears / headphones).", NULL },
     { "Audio",    "Balance",     ST_SLIDER, "balance",      -10,10,1, NULL,0, NULL, apply_balance, 0,
@@ -834,7 +853,9 @@ static const setting_t TABLE[] = {
     { "Theme Colours",  "Appearance",  ST_CYCLER, "theme_variant", 0,0,0, OPT_APPEARANCE, 2, NULL, apply_appearance, 0,
       "Dark or light screens. Changing it redraws the screen in a moment; music keeps playing.", NULL },
     { "Theme Colours",  "Automatic Appearance", ST_TOGGLE, "theme_auto", 0,1,1, NULL,0,NULL,apply_theme_auto,0,
-      "Ring, Braun and Disco: Light 07:00-20:00, Dark otherwise. Applies at screen-off. Outdoor stays Light.",NULL },
+      "Ring, Braun, Disco and Zune: Light 07:00-20:00, Dark otherwise. Applies at screen-off. Outdoor stays Light.",NULL },
+    { "Theme Colours",  "Home Background", ST_TOGGLE, "zhome_bg", 0,1,1, NULL, 0, NULL, apply_zhome_bg, 1,
+      "The playing album, dimmed, drifting slowly behind the home list.", NULL },
     { "Theme Colours",  "Outdoor Mode", ST_TOGGLE, "outdoor",  0,1,1, NULL, 0, NULL, apply_outdoor, 0,
       "Light UI at full brightness for sunlight; uses more battery. Off restores your brightness.", NULL },
     { "Theme Colours",  "Accent Colour", ST_ACTION, NULL, 0,0,0, NULL,0, LV_SYMBOL_RIGHT, apply_open_colorpick, 0,
@@ -871,6 +892,8 @@ static const setting_t TABLE[] = {
       "How long after the screensaver the screen turns fully off.", NULL },
     { "Standby",  "Lock Screen", ST_CYCLER, "zlock_src", 0,0,0, OPT_ZLOCK, 2, NULL, NULL, 0,
       "What the lock screen shows while music plays.", OPT_ZLOCK_D },
+    { "Standby",  "Desk Clock", ST_TOGGLE, "zdock", 0,1,1, NULL, 0, NULL, NULL, 1,
+      "While charging, the lock screen stays on, dimmed, as a clock with the weather and what's playing.", NULL },
     { "Standby",  "Clock Accent", ST_CYCLER, "zlock_tint", 0,0,0, OPT_ZTINT, 5, NULL, NULL, 4,
       "Which part of the lock-screen clock takes the accent colour.", NULL },
     { "Online & Extras",  "Online Album Art", ST_TOGGLE, "online_art", 0,1,1, NULL, 0, NULL, apply_online_art, 0,
@@ -948,6 +971,8 @@ static const setting_t TABLE[] = {
       "Update from the SD card, restart, reset settings and debug tools.", NULL },
     { "Help", "How to", ST_ACTION, NULL, 0,0,0, NULL,0, LV_SYMBOL_RIGHT, apply_howto, 0,
       "Gestures, navigation and useful shortcuts for the current theme.", NULL },
+    { "Help", "Gesture Guide", ST_ACTION, NULL, 0,0,0, NULL,0, LV_SYMBOL_RIGHT, apply_zguide, 0,
+      "Zune: the swipes, rim scrolling and key shortcuts, one card at a time.", NULL },
     { "Help", "First-use hints", ST_CYCLER, "disco_hints", 0,0,0, OPT_HINTS,3, NULL, apply_hints,0,
       "Automatic stops after discovery or five starts. On keeps tips available. Off hides tips.", NULL },
     { "Help", "Show hints again", ST_ACTION, NULL, 0,0,0, NULL,0, "Reset", apply_hints_reset,0,
@@ -986,7 +1011,7 @@ static const setting_t TABLE[] = {
     { "Maintenance",   "Restart",     ST_ACTION, NULL, 0,0,0, NULL,0, "Restart", apply_restart, 0,
       "Restart the device. Boots your default UI; hold Vol-Up for the other one.", NULL },
     { "Maintenance",   "Reset diskOS Settings", ST_ACTION, NULL, 0,0,0, NULL,0, "Reset", system_reset_open, 0,
-      "Reset UI appearance/behaviour. Keep music, Wi-Fi, Bluetooth, Last.fm, EQ and audio settings.", NULL },
+      "Reset UI appearance/behaviour. Keep music, Wi-Fi, Bluetooth, EQ and audio settings.", NULL },
     { "Maintenance",   "Debug Mode",  ST_ACTION, NULL, 0,0,0, NULL,0, LV_SYMBOL_RIGHT, apply_debug_mode, 0,
       "Enable temporary SSH over Wi-Fi (fresh random password) for debugging. Off by default.", NULL },
     { "About",   "About",       ST_READONLY, NULL, 0,0,0, NULL,0, "diskOS beta", NULL, 0,
@@ -1496,6 +1521,16 @@ static void zarc_cb(lv_event_t *e){
         if(!strcmp(s->cfg_key, "ma_delay_ms")) ma_delay_changed();
     }
 }
+/* zune45: the explainer under a choice dial follows the focus line */
+static lv_obj_t *g_zex; static const setting_t *g_zex_set; static int g_zex_focus;
+static void zex_tick(lv_timer_t *t){
+    (void)t; if(!g_zex || !g_zex_set || !g_zex_set->opt_descs) return;
+    int f = zdial_focus(); if(f == g_zex_focus || f < 0 || f >= g_zex_set->nopts) return;
+    g_zex_focus = f; char d[200] = "";
+    if(g_zex_set->opt_descs[f]) zlower(d, sizeof d, tr(g_zex_set->opt_descs[f]));
+    lv_label_set_text(g_zex, d);
+}
+static void zex_del(lv_event_t *e){ lv_timer_t *t = lv_event_get_user_data(e); if(t) lv_timer_delete(t); g_zex = NULL; g_zex_set = NULL; }
 static int zdetail(lv_obj_t *root){
     const setting_t *s = g_active;
     if(s->type == ST_SLIDER){
@@ -1528,9 +1563,12 @@ static int zdetail(lv_obj_t *root){
         lv_obj_set_style_text_font(g_zsl_unit, zune_font(&font_zune_regular_12), 0); lv_obj_set_style_text_color(g_zsl_unit, TC(TEXT_MUTED), 0);
         lv_obj_align(g_zsl_unit, LV_ALIGN_TOP_MID, 0, 250);
         zslider_show(s, v);
-        lv_obj_t *h = lv_label_create(root); kit_keep(h); lv_label_set_text(h, "drag around the rim");
+        lv_obj_t *h = lv_label_create(root); kit_keep(h);
+        { char d[200] = "drag around the rim"; if(s->desc && s->desc[0]) zlower(d, sizeof d, tr(s->desc));   /* zune45: say what it does */
+          lv_label_set_text(h, d); }
+        lv_obj_set_width(h, 220); lv_label_set_long_mode(h, LV_LABEL_LONG_WRAP); lv_obj_set_style_text_align(h, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_font(h, zune_font(&font_zune_regular_12), 0); lv_obj_set_style_text_color(h, TC(TEXT_MUTED), 0);
-        lv_obj_align(h, LV_ALIGN_TOP_MID, 0, 272);
+        lv_obj_align(h, LV_ALIGN_TOP_MID, 0, 268);
         return 1;
     }
     if((s->type == ST_CYCLER || s->type == ST_CHOICE) && !nav_setting(s) && s->nopts > 0 && s->nopts <= ZDIAL_MAX
@@ -1543,7 +1581,16 @@ static int zdetail(lv_obj_t *root){
         int v = get_val(s); if(v < 0 || v >= s->nopts) v = 0;
         zdial_build(root, lb, s->nopts, v, zdetail_pick, 100, "settings.zdetail");
         zdial_set_color(v, TC(ACCENT_PRIMARY));
-        if(s->opt_descs) for(int i = 0; i < s->nopts; i++) if(s->opt_descs[i]){ char d[120]; zlower(d, sizeof d, tr(s->opt_descs[i])); zdial_set_sub(i, d); }
+        if(s->opt_descs){                                          /* zune45: the choice on the focus line explained, wrapped, low on the glass */
+            zdial_set_bottom(226);
+            lv_obj_t *ex = lv_label_create(root); kit_keep(ex); lv_label_set_text(ex, "");
+            lv_obj_set_width(ex, 236); lv_label_set_long_mode(ex, LV_LABEL_LONG_WRAP); lv_obj_set_style_text_align(ex, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_set_style_text_font(ex, zune_font(&font_zune_regular_12), 0); lv_obj_set_style_text_color(ex, TC(TEXT_MUTED), 0);
+            lv_obj_align(ex, LV_ALIGN_TOP_MID, 0, 250);
+            g_zex = ex; g_zex_set = s; g_zex_focus = -1;
+            lv_timer_t *t = lv_timer_create(zex_tick, 120, NULL); zex_tick(t);
+            lv_obj_add_event_cb(ex, zex_del, LV_EVENT_DELETE, t);
+        }
         char t[64]; zlower(t, sizeof t, tr(display_label(s)));
         zune_pivot(root, t, detail_back_cb);
         zune_status(root, SCR_SETTING_DETAIL);

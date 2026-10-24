@@ -8,6 +8,7 @@
 #include "theme.h"
 #include "theme_kit.h"
 #include "zune_dial.h"
+#include "simple_theme.h"
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
@@ -22,6 +23,8 @@ typedef struct { const char *label; const char *action; void (*open)(void); } zi
 
 static void go_np(void){ screen_show(SCR_NOWPLAYING); }
 static void go_music(void){ screen_show(SCR_LIBRARY); }
+void zquickplay_open(void);
+static void go_quick(void){ zquickplay_open(); }
 static void go_search(void){ screen_show(SCR_SEARCH); }
 static void go_queue(void){ queue_open(); }
 static void go_eq(void){ screen_show(SCR_EQ); }
@@ -35,6 +38,7 @@ static void go_settings(void){ screen_show(SCR_SETTINGS); }
 static const zitem_t ITEMS[] = {
     { "now playing", "home.zune.nowplaying", go_np },
     { "music",       "home.zune.music",      go_music },
+    { "quickplay",   "home.zune.quickplay",  go_quick },
     { "queue",       "home.zune.queue",      go_queue },
     { "search",      "home.zune.search",     go_search },
     { "equalizer",   "home.zune.eq",         go_eq },
@@ -47,7 +51,8 @@ static const zitem_t ITEMS[] = {
 };
 #define ZN ((int)(sizeof ITEMS / sizeof ITEMS[0]))
 #define NP_IDX 0
-#define WX_IDX 8
+#define WX_IDX 9
+#define QP_IDX 2
 
 /* the dial loops: three copies of the list, and when a scroll settles outside the middle copy it jumps by one copy
  * (an identical picture), so it never runs out either way */
@@ -127,6 +132,7 @@ void zhome_create(lv_obj_t *root){
     lv_obj_set_style_bg_color(root, TC(CANVAS), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
 
+    void bg_create_fwd(lv_obj_t *root); bg_create_fwd(root);   /* the album behind the list */
     g_dial = lv_obj_create(root);
     lv_obj_remove_style_all(g_dial); kit_keep(g_dial);
     lv_obj_set_size(g_dial, 360, 360); lv_obj_set_pos(g_dial, 0, 0);
@@ -148,6 +154,7 @@ void zhome_create(lv_obj_t *root){
         lv_obj_set_size(r, 360, ZH_PITCH);
         lv_obj_remove_flag(r, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(r, LV_OBJ_FLAG_SNAPPABLE);
+        lv_obj_set_style_translate_x(r, 6, LV_STATE_PRESSED);          /* zune46: a touched row gives a little */
         if(c == 1) ui_on(r, item_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i, ITEMS[i].action, UI_CORE);   /* the middle copy carries the names */
         else lv_obj_add_event_cb(r, item_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
         g_row[p] = r;
@@ -182,6 +189,7 @@ void zhome_create(lv_obj_t *root){
 
     /* time + battery, centred at the top */
     g_status = zune_status(root, SCR_HOME);                  /* time + battery (and a sleep timer), shared with every Zune screen */
+    zune_sleep_ring(root, 354);                              /* the sleep timer, shrinking round the rim */
 
     lv_obj_update_layout(g_dial);
     lv_obj_scroll_to_y(g_dial, ZH_PITCH * (ZN + 1), LV_ANIM_OFF);   /* "music" in focus, in the middle copy */
@@ -237,3 +245,56 @@ void zhome_set_now_playing(const char *title, const char *artist, bool playing){
 void zhome_status_parts(char *t, size_t n, int *pct, int *chg){ snprintf(t, n, "%s", g_time); *pct = g_batt_pct; *chg = g_batt_chg; }
 void zhome_status_text(char *b, size_t n){ snprintf(b, n, "%s%s%s", g_time, g_time[0] && g_batt[0] ? "  " : "", g_batt); }
 void zhome_test_focus(int i){ if(g_dial){ lv_obj_scroll_to_y(g_dial, ZH_PITCH * (ZN + i), LV_ANIM_OFF); dial_layout(); } }   /* host renders */
+
+/* ---- home background (zune41): the playing album's blurred cover, dimmed, a little larger than the glass and
+ * drifting slowly sideways behind the list (Zune HD's panorama). Baked once per album into a dimmed copy, so a frame
+ * is a plain copy, and moved one pixel at a time, under 2 frames a second, only while Home is on screen. cfg zhome_bg. */
+const lv_image_dsc_t *ui_backdrop_dsc(void);
+#define ZBG_W 420
+#define ZBG_DIM 72                       /* /256: the cover at ~28% */
+#define ZBG_LIT 64                       /* light variant: washed towards white, the cover at ~25% */
+static uint8_t *g_bgbuf; static lv_image_dsc_t g_bgdsc; static lv_obj_t *g_bg; static lv_timer_t *g_bgtm;
+static int g_bgx, g_bgdir = -1;
+static void bg_tick(lv_timer_t *t){
+    (void)t;
+    if(!g_bg || lv_obj_has_flag(g_bg, LV_OBJ_FLAG_HIDDEN) || screen_current() != SCR_HOME) return;
+    g_bgx += g_bgdir;
+    if(g_bgx <= -(ZBG_W - 360)){ g_bgx = -(ZBG_W - 360); g_bgdir = 1; } else if(g_bgx >= 0){ g_bgx = 0; g_bgdir = -1; }
+    lv_obj_set_x(g_bg, g_bgx);
+}
+void zhome_art_changed(void){
+    if(!g_bg) return;
+    const lv_image_dsc_t *b = ui_backdrop_dsc();
+    if(!simple_cfg_get_int("zhome_bg", 1) || !b || !b->data || b->header.w <= 0 || b->header.h <= 0 || b->header.cf != LV_COLOR_FORMAT_XRGB8888){
+        lv_obj_add_flag(g_bg, LV_OBJ_FLAG_HIDDEN); return; }
+    if(!g_bgbuf && !(g_bgbuf = malloc((size_t)ZBG_W * ZBG_W * 4))){ lv_obj_add_flag(g_bg, LV_OBJ_FLAG_HIDDEN); return; }
+    int sw = b->header.w, sh = b->header.h, ss = b->header.stride;
+    const uint8_t *src = b->data;
+    int light = theme_variant() == 1;
+    for(int y = 0; y < ZBG_W; y++){                      /* enlarge (nearest: the source is already blurred) and dim */
+        const uint8_t *row = src + (size_t)(y * sh / ZBG_W) * ss;
+        uint8_t *d = g_bgbuf + (size_t)y * ZBG_W * 4;
+        for(int x = 0; x < ZBG_W; x++, d += 4){
+            const uint8_t *p = row + (size_t)(x * sw / ZBG_W) * 4;
+            if(light){ d[0] = (uint8_t)(255 - ((255 - p[0]) * ZBG_LIT >> 8)); d[1] = (uint8_t)(255 - ((255 - p[1]) * ZBG_LIT >> 8)); d[2] = (uint8_t)(255 - ((255 - p[2]) * ZBG_LIT >> 8)); }
+            else { d[0] = (uint8_t)(p[0] * ZBG_DIM >> 8); d[1] = (uint8_t)(p[1] * ZBG_DIM >> 8); d[2] = (uint8_t)(p[2] * ZBG_DIM >> 8); }
+            d[3] = 0xFF;
+        }
+    }
+    memset(&g_bgdsc, 0, sizeof g_bgdsc);
+    g_bgdsc.header.magic = LV_IMAGE_HEADER_MAGIC; g_bgdsc.header.cf = LV_COLOR_FORMAT_XRGB8888;
+    g_bgdsc.header.w = g_bgdsc.header.h = ZBG_W; g_bgdsc.header.stride = ZBG_W * 4;
+    g_bgdsc.data = g_bgbuf; g_bgdsc.data_size = (uint32_t)ZBG_W * ZBG_W * 4;
+    lv_image_set_src(g_bg, NULL); lv_image_set_src(g_bg, &g_bgdsc);
+    lv_obj_remove_flag(g_bg, LV_OBJ_FLAG_HIDDEN);
+    if(!g_bgtm) g_bgtm = lv_timer_create(bg_tick, 600, NULL);
+}
+void zhome_bg_apply(void){ zhome_art_changed(); }
+static void bg_create(lv_obj_t *root){
+    g_bg = lv_image_create(root); kit_keep(g_bg);
+    lv_obj_set_size(g_bg, ZBG_W, ZBG_W); lv_obj_set_pos(g_bg, 0, -(ZBG_W - 360) / 2);
+    lv_obj_remove_flag(g_bg, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(g_bg, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_background(g_bg);
+}
+void bg_create_fwd(lv_obj_t *root){ bg_create(root); zhome_art_changed(); }

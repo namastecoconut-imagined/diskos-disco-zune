@@ -146,7 +146,7 @@ static lv_obj_t *media_scope;
 void kit_media_scope(lv_obj_t *root){ media_scope=root; }
 static void pass(lv_obj_t *o, kit_role_t parent_role, int is_root, int on_top, int force){
     if(o == media_scope) return;
-    if(th_null()&&(o==screen_get_root(SCR_BT)||o==screen_get_root(SCR_WIFI)||o==screen_get_root(SCR_SONGINFO)||o==screen_get_root(SCR_STATS)||o==screen_get_root(SCR_SPHERE)||o==screen_get_root(SCR_ROULETTE)||o==screen_get_root(SCR_ROULETTE_SPIN)))return;
+    if(th_null()&&(o==screen_get_root(SCR_BT)||o==screen_get_root(SCR_WIFI)||o==screen_get_root(SCR_SONGINFO)||o==screen_get_root(SCR_STATS)))return;
     void (*style)(lv_obj_t *, kit_role_t) = theme_kit()->style;
     kit_role_t r = classify(o, parent_role, is_root, on_top);
     if(force || !lv_obj_has_flag(o, KIT_DONE)){

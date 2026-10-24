@@ -1,10 +1,10 @@
+#include "lvgl/src/core/lv_obj_private.h"
 #include "../zune_dial.h"
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Render actual LVGL screens without starting diskOS's hardware main loop. */
 #include "md5.h"
 #include "zune_dial.h"
 #include "azjump.h"
-#include "roulette_backend.h"
 #include "lvgl/src/widgets/label/lv_label_private.h"
 #include "lvgl/src/misc/lv_timer_private.h"
 #include "simple_theme.h"
@@ -522,6 +522,28 @@ static void stats_seed_demo(void){
     }
     sqlite3_finalize(st); sqlite3_exec(d,"COMMIT;",0,0,0); sqlite3_close(d);
 }
+
+/* touch audit (zune46): every visible control a finger can hit, its size and its padded hit area */
+const char *ui_action_of(const lv_obj_t *o);
+static int audit_visible(lv_obj_t *o){ for(lv_obj_t *p = o; p; p = lv_obj_get_parent(p)) if(lv_obj_has_flag(p, LV_OBJ_FLAG_HIDDEN) || lv_obj_get_style_opa(p, 0) < 20) return 0; return 1; }
+static void audit_walk(lv_obj_t *o, FILE *f, const char *page){
+    if(!o || lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN)) return;
+    if(lv_obj_has_flag(o, LV_OBJ_FLAG_CLICKABLE) && lv_obj_get_event_count(o) > 0 && audit_visible(o)){
+        lv_area_t a; lv_obj_get_coords(o, &a);
+        int w = lv_area_get_width(&a), h = lv_area_get_height(&a), ext = o->spec_attr ? o->spec_attr->ext_click_pad : 0;
+        int cx = (a.x1 + a.x2) / 2, cy = (a.y1 + a.y2) / 2, dx = cx - 180, dy = cy - 180;
+        int on = a.x2 > 0 && a.x1 < 360 && a.y2 > 0 && a.y1 < 360 && dx * dx + dy * dy < 178 * 178;
+        if(on && !(w >= 340 && h >= 340)){
+            const char *act = ui_action_of(o); char txt[48] = "";
+            for(uint32_t i = 0; i < lv_obj_get_child_count(o) && !txt[0]; i++){ lv_obj_t *c = lv_obj_get_child(o, (int32_t)i);
+                if(lv_obj_check_type(c, &lv_label_class)) snprintf(txt, sizeof txt, "%s", lv_label_get_text(c)); }
+            if(!txt[0] && lv_obj_check_type(o, &lv_label_class)) snprintf(txt, sizeof txt, "%s", lv_label_get_text(o));
+            for(char *c = txt; *c; c++) if(*c == ',' || *c == '\n') *c = ' ';
+            fprintf(f, "%s,%d,%d,%d,%d,%d,%d,%d,%s,%s\n", page, a.x1, a.y1, w, h, ext, w + 2 * ext, h + 2 * ext, act ? act : "", txt);
+        }
+    }
+    for(uint32_t i = 0; i < lv_obj_get_child_count(o); i++) audit_walk(lv_obj_get_child(o, (int32_t)i), f, page);
+}
 int main(int argc, char **argv){
     if(argc != 6){ fprintf(stderr,"usage: host-render PRESET VARIANT home|np|actions UP_NEXT OUT.ppm\n"); return 2; }
     setenv("TZ","UTC",1); tzset();
@@ -774,13 +796,6 @@ int main(int argc, char **argv){
         for(int i=0;i<30;i++){lv_tick_inc(10);lv_timer_handler();}
         goto render;
     }
-    if(!strncmp(argv[3],"ssphere-",8)){            /* SongSphere built in: ssphere-0 first page, -1 list, -3 play; ssphere-tag = an album's tag page */
-        screen_set_anim(0);screens_init();
-        if(!strcmp(argv[3],"ssphere-tag")) sphere_ui_tag(1,getenv("SS_KEY")?getenv("SS_KEY"):"Atlas",getenv("SS_KEY")?getenv("SS_KEY"):"Atlas");
-        else sphere_ui_test(atoi(argv[3]+8),getenv("SS_X")?(float)atof(getenv("SS_X")):0.4f,getenv("SS_Y")?(float)atof(getenv("SS_Y")):0.5f);
-        for(int i=0;i<30;i++){lv_tick_inc(10);lv_timer_handler();}
-        goto render;
-    }
     if(!strncmp(argv[3],"appshelf",8)){            /* Apps (appshelf.c): the list; -pick = Choose apps; -land = the 3rd app's landing page */
         if(getenv("APPS_PINS")){ char b[256]; snprintf(b,sizeof b,"%s",getenv("APPS_PINS")); int s=0;   /* folder names / built-in keys */
             for(char *p=strtok(b,",");p&&s<5;p=strtok(NULL,",")){ char id[33],k[12]; md5_hex(p,strlen(p),id); snprintf(k,sizeof k,"apps_p%d",++s); cfg_set_str(k,id); }
@@ -793,14 +808,6 @@ int main(int argc, char **argv){
         for(int i=0;i<30;i++){lv_tick_inc(10);lv_timer_handler();}
         goto render;
     }
-    if(!strncmp(argv[3],"roulette-",9)){           /* Album Roulette built in: roulette-<ms> after I feel lucky! (roulette-land: its page) */
-        screen_set_anim(0);screens_init();
-        if(!strcmp(argv[3],"roulette-land")) screen_show(SCR_ROULETTE);
-        else { roulette_spin_open(); int ms=atoi(argv[3]+9);
-            for(int t=0;t<ms;t+=10){ lv_tick_inc(10); lv_timer_handler(); if(t%200==0) usleep(2000); } }
-        for(int i=0;i<35;i++){lv_tick_inc(10);lv_timer_handler();}
-        goto render;
-    }
     if(!strcmp(argv[3],"splashbench")){           /* the splash's cost per frame: ms of work per 40 ms step */
         screen_set_anim(0);screens_init(); lv_obj_invalidate(lv_screen_active()); lv_refr_now(NULL);
         for(int ms=0;ms<=2600;ms+=40){ struct timespec a,b,c; clock_gettime(CLOCK_MONOTONIC,&a);
@@ -808,8 +815,16 @@ int main(int argc, char **argv){
             printf("%5d frame %6.2f render %6.2f\n",ms,(b.tv_sec-a.tv_sec)*1e3+(b.tv_nsec-a.tv_nsec)/1e6,(c.tv_sec-b.tv_sec)*1e3+(c.tv_nsec-b.tv_nsec)/1e6); }
         return 0;
     }
+    if(!strncmp(argv[3],"zoff-",5)){               /* the Zune power-off screen with its ring at zoff-<degrees> */
+        screen_set_anim(0);screens_init(); void ui_shutdown_screen(void); void zune_shutdown_test(int);
+        ui_shutdown_screen(); zune_shutdown_test(atoi(argv[3]+5));
+        for(int i=0;i<3;i++){lv_tick_inc(10);lv_timer_handler();}
+        goto render;
+    }
     if(!strncmp(argv[3],"splash-",7)){             /* the boot splash standing at splash-<ms> */
         screen_set_anim(0);screens_init();
+        splash_test_frame(atoi(argv[3]+7));
+        for(int i=0;i<(getenv("ZSPLASH_WAIT")?150:3);i++){lv_tick_inc(10);lv_timer_handler(); if(getenv("ZSPLASH_WAIT")) usleep(3000);}
         splash_test_frame(atoi(argv[3]+7));
         for(int i=0;i<3;i++){lv_tick_inc(10);lv_timer_handler();}
         goto render;
@@ -832,15 +847,6 @@ int main(int argc, char **argv){
                 lv_obj_scroll_to_y(list,atoi(getenv("STATS_SCROLL")),LV_ANIM_OFF); lv_obj_send_event(list,LV_EVENT_SCROLL,NULL); }
         }
         for(int i=0;i<20;i++){lv_tick_inc(10);lv_timer_handler();}
-        goto render;
-    }
-    if(!strncmp(argv[3],"sphere-",7)){             /* SongSphere concept mockups (tests/sphere_mock.c) */
-        void sphere_mock(lv_obj_t *root,int which);
-        lv_obj_t *r=lv_obj_create(lv_screen_active()); lv_obj_remove_style_all(r); lv_obj_set_size(r,360,360);
-        lv_obj_set_style_radius(r,LV_RADIUS_CIRCLE,0); lv_obj_set_style_clip_corner(r,true,0);
-        lv_obj_remove_flag(r,LV_OBJ_FLAG_SCROLLABLE);
-        sphere_mock(r,atoi(argv[3]+7));
-        for(int i=0;i<10;i++){lv_tick_inc(10);lv_timer_handler();}
         goto render;
     }
     if(!strncmp(argv[3],"hint-",5)){              /* one first-use hint, shown (disco_hints On); HINT_SIDE=1 mirrors */
@@ -867,22 +873,6 @@ int main(int argc, char **argv){
         lv_obj_remove_flag(r,LV_OBJ_FLAG_SCROLLABLE);
         stats_mock(r,atoi(argv[3]+6));
         for(int i=0;i<10;i++){lv_tick_inc(10);lv_timer_handler();}
-        goto render;
-    }
-    if(!strcmp(argv[3],"appland-boom")){           /* the Boomshine landing page, for comparison */
-        screen_set_anim(0);screens_init();boomshine_landing();
-        for(int i=0;i<20;i++){lv_tick_inc(10);lv_timer_handler();}
-        if(th_null()){
-            lv_obj_t *l=find_visible_text(screen_get_root(SCR_APPLAND),"Play");assert(l);
-            lv_color_t ink=lv_obj_get_style_text_color(l,0);assert(ink.red+ink.green+ink.blue>96);
-            assert(lv_obj_get_style_border_width(lv_obj_get_parent(l),0)==1);
-            if(getenv("REVIEW_NULL_LANDING")){
-                const char *labels[]={"Show me","Open"};
-                for(int j=0;j<2;j++){applanding_show(j?"Installed App":"Listening Stats","Tagline","App description",labels[j],j?"/not-launched":APP_BUILTIN_STATS);nav_wait(40);
-                    l=find_visible_text(screen_get_root(SCR_APPLAND),labels[j]);assert(l);ink=lv_obj_get_style_text_color(l,0);assert(ink.red+ink.green+ink.blue>96);}
-                puts("PASS: Boomshine, Stats and generic app landing buttons remain readable");
-            }
-        }
         goto render;
     }
     if(!strncmp(argv[3],"disco-",6)){              /* "Disco" theme concept mockups (tests/disco_mock.c) */
@@ -1047,7 +1037,7 @@ int main(int argc, char **argv){
         else if(!strcmp(page,"settings")){scr=SCR_SETTINGS;}
         else if(!strcmp(page,"howto")){extern void settings_open_howto(void);settings_open_howto();scr=SCR_SETLIST;}
         else if(!strcmp(page,"quick"))scr=SCR_QUICK;else if(!strcmp(page,"np") || !strncmp(page,"immersive",9))scr=SCR_NOWPLAYING;else if(!strcmp(page,"eq"))scr=SCR_EQ;
-        else if(!strcmp(page,"bands"))scr=SCR_EQ_EDITOR;else if(!strcmp(page,"display")){setlist_open("Display");scr=SCR_SETLIST;}else if(!strcmp(page,"network")){setlist_open("Network");scr=SCR_SETLIST;}else if(!strcmp(page,"system")){setlist_open("System");scr=SCR_SETLIST;}else if(!strcmp(page,"info")){songinfo_unpin();songinfo_set(&st);scr=SCR_SONGINFO;}else if(!strcmp(page,"colorpick")){colorpick_open();scr=SCR_COLORPICK;}else if(!strcmp(page,"zdate")){scr=SCR_DATETIME;}else if(!strcmp(page,"zabout")){void system_about_open(int);scr=SCR_SETTINGS;screen_show(scr);system_about_open(0);}else if(!strcmp(page,"zsdupd")){void system_update_sd_open(int);scr=SCR_SETTINGS;screen_show(scr);system_update_sd_open(0);}else if(!strcmp(page,"wifiinfo")){void wifi_info_open(void);wifi_info_open();scr=SCR_WIFI_INFO;}else if(!strcmp(page,"stats")){void stats_open(void);stats_open();scr=SCR_STATS;}else if(!strcmp(page,"lastfm")){scr=SCR_LASTFM;}else if(!strcmp(page,"zmove")){scr=SCR_FOLDER;}else if(!strcmp(page,"zscan")){void zune_scan_show(void);scr=SCR_LIBRARY;screen_show(scr);zune_scan_show();}else if(!strcmp(page,"setkey")){void settings_test_open_key(const char*);settings_test_open_key(getenv("SETKEY"));scr=SCR_SETTING_DETAIL;}else if(!strcmp(page,"group")){void settings_open_group(const char*);setlist_open("Display");setlist_open(getenv("SETGROUP"));scr=SCR_SETLIST;screen_show(scr);settings_open_group(getenv("SETGROUP"));}
+        else if(!strcmp(page,"bands"))scr=SCR_EQ_EDITOR;else if(!strcmp(page,"display")){setlist_open("Display");scr=SCR_SETLIST;}else if(!strcmp(page,"network")){setlist_open("Network");scr=SCR_SETLIST;}else if(!strcmp(page,"system")){setlist_open("System");scr=SCR_SETLIST;}else if(!strcmp(page,"info")){songinfo_unpin();songinfo_set(&st);scr=SCR_SONGINFO;}else if(!strcmp(page,"colorpick")){colorpick_open();scr=SCR_COLORPICK;}else if(!strcmp(page,"zdate")){scr=SCR_DATETIME;}else if(!strcmp(page,"zabout")){void system_about_open(int);scr=SCR_SETTINGS;screen_show(scr);system_about_open(0);}else if(!strcmp(page,"zsdupd")){void system_update_sd_open(int);scr=SCR_SETTINGS;screen_show(scr);system_update_sd_open(0);}else if(!strcmp(page,"wifiinfo")){void wifi_info_open(void);wifi_info_open();scr=SCR_WIFI_INFO;}else if(!strcmp(page,"zquick")){void zquickplay_open(void);zquickplay_open();scr=SCR_QUICKPLAY;}else if(!strcmp(page,"stats")){void stats_open(void);stats_open();scr=SCR_STATS;}else if(!strcmp(page,"zmove")){scr=SCR_FOLDER;}else if(!strcmp(page,"zscan")){void zune_scan_show(void);scr=SCR_LIBRARY;screen_show(scr);zune_scan_show();}else if(!strcmp(page,"setkey")){void settings_test_open_key(const char*);settings_test_open_key(getenv("SETKEY"));scr=SCR_SETTING_DETAIL;}else if(!strcmp(page,"group")){void settings_open_group(const char*);setlist_open("Display");setlist_open(getenv("SETGROUP"));scr=SCR_SETLIST;screen_show(scr);settings_open_group(getenv("SETGROUP"));}
         else if(!strcmp(page,"library") || !strcmp(page,"albums"))scr=SCR_LIBRARY;else if(!strcmp(page,"settings"))scr=SCR_SETTINGS;
         else if(!strcmp(page,"upnext"))scr=SCR_UPNEXT;else if(!strcmp(page,"modes"))scr=SCR_WORKMODE;
         else if(!strcmp(page,"queue"))scr=SCR_QUEUE;
@@ -1072,6 +1062,7 @@ int main(int argc, char **argv){
         if(getenv("ZSCANCEL")){ nav_wait(200); lv_obj_t *o=ui_action_find("kb.zune.cancel"); fprintf(stderr,"cancel btn %p scr before %d\n",(void*)o,screen_current()); if(o) lv_obj_send_event(o,LV_EVENT_CLICKED,NULL); nav_wait(600); fprintf(stderr,"scr after %d\n",screen_current()); }
         if(getenv("ZHFOCUS")){ void zhome_test_focus(int); void home_set_weather(const char*); home_set_weather("\xEF\x86\x85  18\xC2\xB0C Clear"); zhome_test_focus(atoi(getenv("ZHFOCUS"))); nav_wait(100); }
         if(getenv("ZROUTE")){ void modes_test_route(int); modes_test_route(atoi(getenv("ZROUTE"))); nav_wait(100); }
+        if(getenv("ZGUIDE")){ nav_wait(50); zune_guide_preview(atoi(getenv("ZGUIDE"))); nav_wait(250); }
         if(getenv("ZOUT")){ nav_wait(50); if(atoi(getenv("ZOUT"))==2) zune_toast_action(LV_SYMBOL_USB,"usb-c headphones","switch output?","switch",NULL,6000); else { void modes_output_open(void); modes_output_open(); } nav_wait(150); }
         if(getenv("ZTAKE")){ nav_wait(50); int k=atoi(getenv("ZTAKE"));
             if(k==1){ ztake_t z={.icon=LV_SYMBOL_WIFI,.spin=1,.ring_pct=-1,.title="connecting",.sub="to studio",.l1="cancel"}; zune_takeover(&z); }
@@ -1079,6 +1070,7 @@ int main(int argc, char **argv){
             else if(k==3){ ztake_t z={.icon=LV_SYMBOL_AUDIO,.icon_ring=80,.spin=1,.ring_pct=-1,.title="connecting",.sub="with sony wh-1000xm5",.note="if a code appears on your device, it should match",.l1="cancel"}; zune_takeover(&z); }
             else if(k==4){ void usage_shutdown_countdown(int); usage_shutdown_countdown(2); }
             nav_wait(100); }
+        if(getenv("ZDOCK")){ void zsaver_set_dock(int); zsaver_set_dock(1); nav_wait(50); }
         if(getenv("ZSAVER_IDLE")){ saver_set_track(NULL,NULL,NULL,NULL); }
         if(getenv("ZSAVER_T")){ saver_set_clock(getenv("ZSAVER_T"),""); nav_wait(50); }
         if(getenv("ZKB")){ if(getenv("ZKB_PW")) kbinput_open_password(getenv("ZKB"), "aurora_r", NULL); else kbinput_open(getenv("ZKB"), "late night", NULL);
@@ -1096,8 +1088,11 @@ int main(int argc, char **argv){
         if(getenv("ZUNE_LYRICS")){ sd_io_init(media_local); sd_io_resume(); cfg_set_int_deferred("online_lyrics",0); lyrics_open();
             for(int i=0;i<300;i++){ lv_tick_inc(10); lv_timer_handler(); lyrics_poll(NULL); usleep(2000); } }
         if(getenv("ZUNE_IMM")){ void ui_zune_imm_preview(int,int); nav_wait(200); ui_zune_imm_preview(atoi(getenv("ZUNE_IMM")),550); nav_wait(300); }
+        if(getenv("ZNPIDLE")){ track_state_t z; memset(&z,0,sizeof z); ipc_seed_state(&z); ui_update(&z); nav_wait(100); }
+        if(getenv("ZNPCTL")){ void ui_np_zune_toggle_controls(void); nav_wait(100); ui_np_zune_toggle_controls(); nav_wait(100); }
         if(getenv("ZUNE_SI")){ songinfo_set(&st); nav_wait(200); }
         if(getenv("ZSEARCH_Q")){ void search_test_query(const char*); void kbinput_close(void); nav_wait(100); search_test_query(getenv("ZSEARCH_Q")); for(int i=0;i<20;i++){lv_tick_inc(10);lv_timer_handler();} }
+        if(getenv("ZLIB_SONGS")){ void library_open_songs(void); library_open_songs(); nav_wait(200); }
         if(getenv("ZAZ")){ void azjump_test_grid(void); azjump_test_grid(); for(int i=0;i<10;i++){lv_tick_inc(10);lv_timer_handler();} }
         if(getenv("ZHOLD")){ void songmenu_open_song(const char*); songmenu_open_song(getenv("ZHOLD")); for(int i=0;i<20;i++){lv_tick_inc(10);lv_timer_handler();} }
         if(getenv("ZUNE_CLICK")){ nav_wait(350); lv_obj_t *o=ui_action_find(getenv("ZUNE_CLICK")); assert(o); lv_obj_send_event(o,LV_EVENT_CLICKED,NULL); }
@@ -1108,6 +1103,17 @@ int main(int argc, char **argv){
             nav_pointer.point=(lv_point_t){x0,y}; nav_pointer.state=LV_INDEV_STATE_PRESSED; nav_wait(30);
             for(int k=1;k<=10;k++){ nav_pointer.point.x=x0+(x1-x0)*k/10; nav_wait(15); }
             nav_pointer.state=LV_INDEV_STATE_RELEASED; nav_wait(500); fprintf(stderr,"after swipe scr=%d\n",screen_current()); }
+        if(getenv("ZTAPXY")){ int x=180,y=180; sscanf(getenv("ZTAPXY"),"%d,%d",&x,&y);
+            lv_indev_t *zi=lv_indev_create();lv_indev_set_type(zi,LV_INDEV_TYPE_POINTER);lv_indev_set_read_cb(zi,nav_read);lv_timer_set_period(lv_indev_get_read_timer(zi),10);
+            if(getenv("ZTAP_IMM")){ ui_np_fsart_open(); nav_wait(400); }
+            nav_pointer.point=(lv_point_t){x,y}; nav_pointer.state=LV_INDEV_STATE_PRESSED; nav_wait(60);
+            if(!getenv("ZTAP_HOLD")){ nav_pointer.state=LV_INDEV_STATE_RELEASED; nav_wait(300); } fprintf(stderr,"tap done\n"); }
+        if(getenv("ZOUTCLOSE")){ void modes_output_open(void); void modes_output_close_test(void); nav_wait(50); modes_output_open(); nav_wait(100); modes_output_close_test(); nav_wait(100); }
+        if(getenv("ZVSWIPE")){ int x=180,y0=0,y1=0; sscanf(getenv("ZVSWIPE"),"%d,%d,%d",&x,&y0,&y1);
+            lv_indev_t *zi=lv_indev_create();lv_indev_set_type(zi,LV_INDEV_TYPE_POINTER);lv_indev_set_read_cb(zi,nav_read);lv_timer_set_period(lv_indev_get_read_timer(zi),10);
+            nav_pointer.point=(lv_point_t){x,y0}; nav_pointer.state=LV_INDEV_STATE_PRESSED; nav_wait(30);
+            for(int k=1;k<=12;k++){ nav_pointer.point.y=y0+(y1-y0)*k/12; nav_wait(15); }
+            if(!getenv("ZVSWIPE_HOLD")){ nav_pointer.state=LV_INDEV_STATE_RELEASED; nav_wait(1500); } }
         if(getenv("ZLIB_PIVOT")){ int library_pivot_swipe(int); nav_wait(100); library_pivot_swipe(atoi(getenv("ZLIB_PIVOT"))); nav_wait(400); }
         if(getenv("ZUNE_SCLICK")){ nav_wait(200); lv_obj_t *o=ui_action_find(getenv("ZUNE_SCLICK")); assert(o); lv_obj_send_event(o,LV_EVENT_SHORT_CLICKED,NULL); nav_wait(300); }
         if(getenv("ZLIB_SCROLL2")){ lv_obj_t *library_scroller(void); nav_wait(100); lv_obj_scroll_to_y(library_scroller(),atoi(getenv("ZLIB_SCROLL2")),LV_ANIM_OFF); nav_wait(200); }
@@ -1855,40 +1861,6 @@ render:
         screen_home();nav_wait(100);
         puts("PASS: Album Wall queued work survives repeated enter/drag/leave, hidden trim and reopen");return 0;
     }
-    if(getenv("REVIEW_ROULETTE_MEMORY")){
-        assert(mdb_load()==40);screen_set_anim(1);
-        for(int cycle=0;cycle<6;cycle++){
-            screen_show(SCR_ROULETTE);roulette_spin_open();lv_obj_t *again=NULL;
-            for(int i=0;i<5000;i++){nav_wait(10);if(i%10==0)usleep(3000);again=find_visible_text(screen_get_root(SCR_ROULETTE_SPIN),"Again");if(again)break;}
-            assert(again && album_count==10);
-            lv_obj_t *root=screen_get_root(SCR_ROULETTE_SPIN),*landing=lv_obj_get_child(root,0),*spin=lv_obj_get_child(root,1);
-            assert(lv_image_get_src(lv_obj_get_child(landing,0))==NULL);
-            for(int i=0;i<3;i++){const lv_image_dsc_t *image=lv_image_get_src(lv_obj_get_child(spin,i));assert(image&&image->header.w==224&&image->data_size==224*224*4);}
-            lv_obj_t *exit=find_visible_text(root,"Exit");assert(exit);lv_obj_send_event(lv_obj_get_parent(exit),LV_EVENT_CLICKED,NULL);
-            nav_wait(30);if(lv_obj_is_visible(root))assert(album_count==10);
-            nav_wait(1500);assert(album_count==0);
-            for(int i=0;i<POOL;i++)assert(!albums[i].pixels);
-            for(int i=0;i<3;i++)assert(lv_image_get_src(lv_obj_get_child(spin,i))==NULL);
-        }
-        for(int cycle=0;cycle<6;cycle++){
-            screen_show(SCR_ROULETTE);roulette_spin_open();nav_wait(10);screen_home();nav_wait(10);
-            screen_show(SCR_ROULETTE);roulette_spin_open();nav_wait(3000);screen_home();
-            for(int i=0;i<1000 && album_count;i++){nav_wait(10);usleep(1000);}
-            nav_wait(1500);assert(album_count==0);
-        }
-        puts("PASS: Roulette releases hidden wheel, 224px covers and mappings after animated exits; repeated close/reopen and cancellation recover");return 0;
-    }
-    if(getenv("REVIEW_ROULETTE_ACTIONS")){
-        assert(mdb_load()==40);screen_set_anim(0);roulette_spin_open();
-        lv_obj_t *again=NULL;
-        for(int i=0;i<3000;i++){nav_wait(10);if(i%10==0)usleep(2000);again=find_visible_text(screen_get_root(SCR_ROULETTE_SPIN),"Again");if(again)break;}
-        assert(again);lv_obj_t*root=screen_get_root(SCR_ROULETTE_SPIN);lv_obj_t*exit=find_visible_text(root,"Exit");assert(exit);assert(!find_visible_text(root,"Back"));
-        lv_obj_t*ab=lv_obj_get_parent(again),*eb=lv_obj_get_parent(exit);assert(lv_obj_get_y(ab)==lv_obj_get_y(eb));assert(lv_obj_get_style_radius(ab,0)>=lv_obj_get_height(ab)/2);assert(lv_obj_get_style_radius(eb,0)>=lv_obj_get_height(eb)/2);
-        lv_obj_send_event(ab,LV_EVENT_CLICKED,NULL);nav_wait(300);assert(!find_visible_text(root,"Again"));
-        for(int i=0;i<1500;i++){nav_wait(10);if(i%10==0)usleep(1000);again=find_visible_text(root,"Again");if(again)break;}
-        assert(again);exit=find_visible_text(root,"Exit");assert(exit);lv_obj_send_event(lv_obj_get_parent(exit),LV_EVENT_CLICKED,NULL);nav_wait(100);assert(screen_current()==SCR_HOME);
-        puts("PASS: Roulette themed pill row, Again rerolls prepared pool, Exit leaves app, no Back button");return 0;
-    }
     if(getenv("REVIEW_LETTER_WHEEL")){
         static azjump_t picker;lv_obj_t*parent=lv_obj_create(lv_layer_top());lv_obj_remove_style_all(parent);lv_obj_set_size(parent,360,360);
         azjump_create(&picker,parent,wheel_test_jump,"library");
@@ -2183,11 +2155,12 @@ render:
         unsigned char rgb[3]={pixels[i+2],pixels[i+1],pixels[i]}; fwrite(rgb,1,3,f);
     }
     if(fclose(f)) return 1;
+    if(getenv("ZAUDIT")){ FILE *af = fopen(getenv("ZAUDIT"), "a"); if(af){ const char *pg = getenv("ZAUDIT_PAGE") ? getenv("ZAUDIT_PAGE") : argv[3];
+        audit_walk(lv_screen_active(), af, pg); audit_walk(lv_layer_top(), af, pg); fclose(af); } }
     printf("PASS: %s preset=%s variant=%s up_next=%s\n",argv[3],argv[1],argv[2],argv[4]);
     return 0;
 }
 #include "disco_mock.c"
 #include "stats_mock.c"
-#include "sphere_mock.c"
 
 #include "volume_concepts_mock.c"

@@ -1082,7 +1082,7 @@ void null_screen_entered(int which)
     if(which==SCR_SAVER)null_art_changed();
     onboarding_screen(which,nav_open);
     int hidden = which == SCR_QUICK || which == SCR_SAVER || which == SCR_NOWPLAYING ||
-                 which == SCR_SPHERE || which == SCR_SETTINGS || which == SCR_SETLIST ||
+                 which == SCR_SETTINGS || which == SCR_SETLIST ||
                  which == SCR_SETTING_DETAIL || which == SCR_QSCONFIG || which == SCR_SCCONFIG ||
                  which == SCR_COLORPICK || which == SCR_DATETIME || which == SCR_EQ || which == SCR_EQ_EDITOR;
     if (menu)

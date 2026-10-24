@@ -41,7 +41,7 @@ static lv_obj_t *screen_make_root(lv_obj_t *parent)
     lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);
     /* Slide is the only GPU-less-smooth transition (a blit, not a resample). Each root carries a
      * 1px leading-edge hairline so the sliding boundary reads as a card edge. */
-    anim_panel_shadow(root);
+    if(!th_zune()) anim_panel_shadow(root);          /* Zune: no card edge - its screens swing in over the canvas */
     return root;
 }
 
@@ -49,7 +49,7 @@ static lv_obj_t *screen_make_root(lv_obj_t *parent)
  * the completion callbacks so a screen left mid-zoom by an interrupt is always normalized. */
 static void root_rest(lv_obj_t *o)
 {
-    lv_obj_set_x(o, 0);
+    lv_obj_set_x(o, 0); lv_obj_set_y(o, 0);
     lv_obj_set_style_opa(o, LV_OPA_COVER, 0);
     lv_obj_set_style_transform_scale_x(o, 256, 0);
     lv_obj_set_style_transform_scale_y(o, 256, 0);
@@ -82,6 +82,21 @@ static void scrim_off(void)
     }
 }
 
+#define ZMOTION_MS 190
+static void zm_exec_x(void *o, int32_t v){ lv_obj_set_x((lv_obj_t *)o, v); }
+static void zm_exec_y(void *o, int32_t v){ lv_obj_set_y((lv_obj_t *)o, v); }
+static void zune_motion(lv_obj_t *o, int vertical, int from, uint32_t ms){
+    lv_anim_t a; lv_anim_init(&a); lv_anim_set_var(&a, o);
+    lv_anim_set_exec_cb(&a, vertical ? zm_exec_y : zm_exec_x);
+    lv_anim_set_values(&a, from, 0); lv_anim_set_duration(&a, ms);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    if(vertical) lv_obj_set_y(o, from); else lv_obj_set_x(o, from);
+    lv_anim_start(&a);
+}
+static int s_qs_under = -1;
+static void qs_open_done(lv_anim_t *a){ (void)a; if(s_qs_under >= 0 && s_qs_under < SCR_COUNT && s_roots[s_qs_under] && s_qs_under != s_current)
+    lv_obj_add_flag(s_roots[s_qs_under], LV_OBJ_FLAG_HIDDEN); s_qs_under = -1; }   /* fully covered: stop drawing it */
+static void qs_close_done(lv_anim_t *a){ lv_obj_t *o = (lv_obj_t *)a->var; if(o != s_roots[s_current]){ lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN); } lv_obj_set_y(o, 0); }
 static void anim_done_hide(lv_anim_t *a)
 {
     lv_obj_t *o = (lv_obj_t *)a->var;
@@ -173,8 +188,8 @@ static void transition_core(int from, int to, int dir)
                                                     * (Settings) elsewhere, without needing a restart */
 
     kit_pass(nw);   /* the active theme styles anything new on the incoming screen (no-op for Default) */
-    if(th_zune() && (to == SCR_STATS || to == SCR_LASTFM || to == SCR_APPS || to == SCR_ROULETTE || to == SCR_APPLAND || to == SCR_APPSHELF
-                     || to == SCR_SPHERE || to == SCR_ROULETTE_SPIN || to == SCR_MA || to == SCR_TUNE || to == SCR_APPPICK || to == SCR_SCCONFIG
+    if(th_zune() && (to == SCR_STATS || to == SCR_APPS || to == SCR_APPLAND || to == SCR_APPSHELF
+                     || to == SCR_MA || to == SCR_TUNE || to == SCR_APPPICK || to == SCR_SCCONFIG
                      || to == SCR_QSCONFIG || to == SCR_DEBUG || to == SCR_CHAPTERS)){
         void zune_retype(lv_obj_t *root); zune_retype(nw);          /* stock screens without a Zune layout: at least the Zune type */
     }
@@ -202,7 +217,41 @@ static void transition_core(int from, int to, int dir)
     /* Full-screen overlays (screensaver, quick-settings pulldown) are takeovers, not hierarchical
      * navigation - show/hide instantly. */
     if (to == SCR_SAVER || from == SCR_SAVER) { show_raw(to); return; }
+    if (th_zune() && (to == SCR_QUICK || from == SCR_QUICK) && od && nw) {
+        /* zune47: the control panel slides down from the top over the screen, and back up when it closes */
+        int opening = (to == SCR_QUICK);
+        lv_obj_t *panel = opening ? nw : od, *under = opening ? od : nw;
+        lv_obj_clear_flag(under, LV_OBJ_FLAG_HIDDEN); lv_obj_clear_flag(panel, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(panel);
+        s_qs_under = opening ? from : -1;
+        lv_anim_t a; lv_anim_init(&a); lv_anim_set_var(&a, panel); lv_anim_set_exec_cb(&a, zm_exec_y);
+        lv_anim_set_values(&a, opening ? -SCR_W : 0, opening ? 0 : -SCR_W);
+        lv_anim_set_duration(&a, opening ? 220 : 180);
+        lv_anim_set_path_cb(&a, opening ? lv_anim_path_ease_out : lv_anim_path_ease_in);
+        lv_anim_set_completed_cb(&a, opening ? qs_open_done : qs_close_done);
+        lv_obj_set_y(panel, opening ? -SCR_W : 0);
+        lv_anim_start(&a);
+        if(!opening) lv_obj_move_foreground(panel);
+        return;
+    }
     if (to == SCR_QUICK || from == SCR_QUICK) { show_raw(to); return; }
+
+    /* ---- Zune (zune45): motion by meaning, Windows Phone 7 style ----------------------------------------------
+     * Only the incoming screen moves, a short way, over the plain canvas (the outgoing one is gone at once), so a
+     * frame is one blit of one screen - cheaper than the full 360 px slide. Into or out of a section from Home it
+     * swings in sideways (turnstile); going deeper within a section it rises from below (continuum); Back plays the
+     * mirror image of the way in. */
+    if (th_zune()) {
+        int turn = (from == SCR_HOME || to == SCR_HOME);
+        if (od && od != nw) { lv_obj_add_flag(od, LV_OBJ_FLAG_HIDDEN); root_rest(od); }
+        lv_obj_clear_flag(nw, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(nw);
+        s_push_hide = -1;
+        int d = dir > 0 ? 1 : -1;
+        if (turn) zune_motion(nw, 0, d * 64, ZMOTION_MS);
+        else      zune_motion(nw, 1, d * 44, ZMOTION_MS);
+        return;
+    }
 
     /* ---- UNIFIED push/pop - ONE motion language for the whole UI ----------------------------
      * The top screen SLIDES horizontally over a STATIC screen beneath (a blit - the only smooth
@@ -287,6 +336,7 @@ void screen_home(void)
 void screen_back(void)
 {
     if(azjump_close_active())return;
+    { int zmodal_close_top(void); if(th_zune() && zmodal_close_top()) return; }   /* a Zune overlay (output picker): Back closes it */
     if(th_simple()&&simple_nav_is_open()){simple_nav_open(0);return;}
     if(disco_editor_back())return;
     if(disco_track_overlay_visible()){dhome_overlay_close();return;}
@@ -294,11 +344,9 @@ void screen_back(void)
     if (s_current == SCR_SEARCH && (search_back_consumed() || search_back_to_landing())) return;   /* fork: results page -> back to the keyboard */
     if (s_current == SCR_SETLIST && settings_back_consumed()) return;
     if (s_current == SCR_STATS && stats_back_consumed()) return;
-    if (s_current == SCR_SPHERE && sphere_ui_back_consumed()) return;   /* SongSphere: up one page */          /* Stats: Wrapped / top 15 -> the list */   /* Disco Options -> Display */
     if (s_sp <= 0) return;
     int from = s_current;
     int prev = s_stack[--s_sp];
-    if(prev == SCR_ROULETTE_SPIN && s_sp > 0) prev = s_stack[--s_sp];   /* a finished spin: back to its landing page */
     s_current = prev;
     s_popping = 1; transition(from, prev, -1); s_popping = 0;
 }
@@ -376,7 +424,6 @@ void screens_init(void)
     s_roots[SCR_WEATHER] = screen_make_root(parent);
     s_roots[SCR_LYRICS] = screen_make_root(parent);
     s_roots[SCR_COLORPICK] = screen_make_root(parent);
-    s_roots[SCR_LASTFM] = screen_make_root(parent);
     s_roots[SCR_WORKMODE] = screen_make_root(parent);
     s_roots[SCR_DEBUG] = screen_make_root(parent);
     s_roots[SCR_FOLDER] = screen_make_root(parent);
@@ -390,13 +437,11 @@ void screens_init(void)
     s_roots[SCR_SCCONFIG]  = screen_make_root(parent);
     s_roots[SCR_MODEINFO]  = screen_make_root(parent);
     s_roots[SCR_MA]        = screen_make_root(parent);
-    s_roots[SCR_ROULETTE]  = screen_make_root(parent);
-    s_roots[SCR_ROULETTE_SPIN] = screen_make_root(parent);
     s_roots[SCR_APPLAND]   = screen_make_root(parent);
     s_roots[SCR_STATS]     = screen_make_root(parent);
+    s_roots[SCR_QUICKPLAY] = screen_make_root(parent);
     s_roots[SCR_APPSHELF]  = screen_make_root(parent);
     s_roots[SCR_APPPICK]   = screen_make_root(parent);
-    s_roots[SCR_SPHERE]    = screen_make_root(parent);
     s_roots[SCR_UPNEXT] = screen_make_root(parent);
     s_roots[SCR_DATETIME] = screen_make_root(parent);
 
@@ -428,13 +473,11 @@ void screens_init(void)
     shortcuts_config_create(s_roots[SCR_SCCONFIG]);
     modeinfo_create(s_roots[SCR_MODEINFO]);
     ma_create(s_roots[SCR_MA]);
-    roulette_create(s_roots[SCR_ROULETTE]);
-    roulette_spin_create(s_roots[SCR_ROULETTE_SPIN]);
     applanding_create(s_roots[SCR_APPLAND]);
     stats_create(s_roots[SCR_STATS]);
+    { void zquickplay_create(lv_obj_t *root); if(th_zune()) zquickplay_create(s_roots[SCR_QUICKPLAY]); }
     appshelf_create(s_roots[SCR_APPSHELF]);
     appshelf_pick_create(s_roots[SCR_APPPICK]);
-    sphere_ui_create(s_roots[SCR_SPHERE]);
     search_create(s_roots[SCR_SEARCH]);
     saver_create(s_roots[SCR_SAVER]);
     quicksettings_create(s_roots[SCR_QUICK]);
@@ -459,7 +502,6 @@ void screens_init(void)
     wifi_info_create(s_roots[SCR_WIFI_INFO]);
     bt_create(s_roots[SCR_BT]);
     bt_info_create(s_roots[SCR_BT_INFO]);
-    lastfm_create(s_roots[SCR_LASTFM]);
     if(th_null()) null_init(parent);
     if (th_disco_family()) disco_init(parent);   /* the cover backdrops, the sheen and the menu picker */
 

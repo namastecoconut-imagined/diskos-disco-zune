@@ -664,7 +664,7 @@ void theme_init(void){
     if(g_preset!=THEME_PRESET_CUSTOM&&!theme_preset_available(g_preset)){
         g_preset=THEME_PRESET_DISCO;cfg_set_int("theme_preset",g_preset);
     }
-    if(g_preset==THEME_PRESET_NULL||g_preset==THEME_PRESET_ZUNE)g_variant=0;   /* dark-only themes */
+    if(g_preset==THEME_PRESET_NULL)g_variant=0;   /* dark-only theme (Zune has a light variant since zune42) */
     if(theme_auto_supported() && cfg_get_int("theme_auto",0) && !outdoor){
         time_t now=time(NULL); struct tm tm; localtime_r(&now,&tm);
         g_variant = !(tm.tm_hour >= 20 || tm.tm_hour < 7);
@@ -1124,7 +1124,7 @@ static void theme_install_lvgl(void){
 const theme_kit_t *theme_kit_for_active(void){ return (g_def && g_def->kit) ? g_def->kit : &theme_kit_default; }
 
 int theme_ring_light(void){return (g_preset==THEME_PRESET_RING || g_preset==THEME_PRESET_DISCO) && g_variant==1;}
-int theme_auto_supported(void){return g_preset==THEME_PRESET_RING || g_preset==THEME_PRESET_BRAUN || g_preset==THEME_PRESET_DISCO;}
+int theme_auto_supported(void){return g_preset==THEME_PRESET_RING || g_preset==THEME_PRESET_BRAUN || g_preset==THEME_PRESET_DISCO || g_preset==THEME_PRESET_ZUNE;}
 int th_null(void){return g_preset==THEME_PRESET_NULL;}
 int th_disco(void){return g_preset==THEME_PRESET_DISCO;}
 int th_simple(void){return g_preset==THEME_PRESET_SIMPLE;}

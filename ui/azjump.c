@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
+#include <stdlib.h>
 #include "config.h"
 #include "null_theme.h"
 
@@ -33,7 +34,7 @@ int azjump_close_active(void){if(!active_wheel)return 0;wheel_close(active_wheel
 int azjump_owns_point(int x,int y){
     if(active_wheel)return 1;
     azjump_t*a=library_picker;
-    if(!a||!wheel_mode(a)||!lv_obj_is_visible(a->btn))return 0;
+    if(!a||(!wheel_mode(a)&&!th_zune())||!a->btn||lv_obj_has_flag(a->btn,LV_OBJ_FLAG_HIDDEN)||!lv_obj_is_visible(a->btn))return 0;   /* Zune: the dot owns its drag (zune47) */
     lv_area_t box;lv_obj_get_coords(a->btn,&box);
     return x>=box.x1-8&&x<=box.x2+8&&y>=box.y1-8&&y<=box.y2+8;
 }
@@ -125,9 +126,27 @@ void azjump_position(azjump_t*a,char letter,int x,int y){
     lv_obj_t*l=lv_obj_get_child(a->btn,0);char text[2]={wheel_letters[a->current],0};lv_label_set_text(l,text);
     lv_obj_set_style_text_font(l,TF(UI_18),0);lv_obj_set_style_text_color(l,TC(ON_ACCENT),0);lv_obj_center(l);kit_keep(l);
 }
+static int g_zsupp;                                        /* Zune: the click that ends a dot drag opens nothing */
 static void wheel_button(lv_event_t*e){
-    azjump_t*a=lv_event_get_user_data(e);if(!wheel_mode(a))return;
+    azjump_t*a=lv_event_get_user_data(e);
     lv_event_code_t c=lv_event_get_code(e);
+    if(th_zune()&&!wheel_mode(a)){                        /* zune47: tap the dot = the letter grid; drag from it = the letters
+                                                         * round the rim, the one under the turn lit; let go = jump there */
+        static lv_point_t p0; static int zdrag;
+        lv_indev_t*in=lv_indev_active();lv_point_t p={0,0};if(in)lv_indev_get_point(in,&p);
+        if(c==LV_EVENT_PRESSED){p0=p;zdrag=0;g_zsupp=0;}
+        else if(c==LV_EVENT_PRESSING){
+            if(!a->wheel&&abs(p.x-p0.x)+abs(p.y-p0.y)>14){
+                lv_obj_t*l=lv_obj_get_child(a->btn,0);const char*t=l?lv_label_get_text(l):"a";
+                char L=(t[0]>='a'&&t[0]<='z')?(char)(t[0]-32):t[0];const char*q=strchr(wheel_letters,L);
+                a->current=q?(int)(q-wheel_letters):0;
+                wheel_open(a);a->held=1;zdrag=1;wheel_pointer(a,1);
+            } else if(a->wheel&&zdrag)wheel_pointer(a,0);
+        }
+        else if((c==LV_EVENT_RELEASED||c==LV_EVENT_PRESS_LOST)&&zdrag){zdrag=0;g_zsupp=1;wheel_close(a,c==LV_EVENT_RELEASED);}
+        return;
+    }
+    if(!wheel_mode(a))return;
     if(c==LV_EVENT_PRESSED)a->held=0;
     else if(c==LV_EVENT_LONG_PRESSED){a->held=1;wheel_open(a);wheel_pointer(a,1);}
     else if(c==LV_EVENT_PRESSING&&a->wheel)wheel_pointer(a,0);
@@ -158,6 +177,7 @@ static void zgrid_cb(lv_event_t *e){                        /* Zune: which tile 
 }
 static void btn_cb(lv_event_t *e){
     if(lv_event_get_code(e) != LV_EVENT_SHORT_CLICKED) return;
+    if(g_zsupp){ g_zsupp = 0; return; }
     azjump_t *a = lv_event_get_user_data(e);
     if(a && wheel_mode(a)){wheel_open(a);return;}
     if(a){ lv_obj_clear_flag(a->grid, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(a->grid); }

@@ -77,7 +77,7 @@ static void pick(int i){
         case A_PLAY:     if(g_gplay) g_gplay(0); break;
         case A_SHUFFLE:  if(g_gplay) g_gplay(1); break;
         case A_SELECT:   if(g_sel) g_sel(); break;
-        case A_MOOD:     sphere_ui_tag(!strcmp(g_gcol, "ALBUM") ? 1 : 2, g_gval, g_gval); break;   /* SongSphere: where it sits */
+        case A_MOOD:     break;                                    /* (SongSphere's Mood: removed in zune50) */
     }
 }
 static void hub_cb(lv_event_t *e){ (void)e; close_ov(); }
@@ -105,6 +105,7 @@ static void zune_menu(const char *title, const int *acts, int n){
         snprintf(lab[i], sizeof lab[i], "%s", g_act[i] == A_FAV && g_fav ? "unfavourite" : ZCAP[g_act[i]]); lb[i] = lab[i];
         if(g_act[i] == A_QUEUE && !focus) focus = i;
     }
+    zmodal_push(g_ov, songmenu_close);                             /* zune45: Back closes it; no rim gestures under it */
     zdial_build(g_ov, lb, g_nact, focus, zpick, 56, "songmenu.zune");
     for(int i = 0; i < g_nact; i++) if(g_act[i] == A_DELETE) zdial_set_color(i, TC(ACCENT_PRIMARY));
     lv_obj_t *t = lv_label_create(g_ov); kit_keep(t);
@@ -187,6 +188,5 @@ void songmenu_open_group(const char *col, const char *val, const char *title, vo
     int A[6] = { A_PLAY, A_SHUFFLE, A_QUEUE, A_PLAYLIST }, n = 4;
     int album = !strcmp(col, "ALBUM");
     if(album) A[n++] = A_TAGS;                                                    /* Tags: albums only */
-    if(sphere_ui_enabled() && (album || !strcmp(col, "ARTIST"))) A[n++] = A_MOOD; /* Mood: albums and artists */
     open_menu(title && title[0] ? title : val, A, n);
 }

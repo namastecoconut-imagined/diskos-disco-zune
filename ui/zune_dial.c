@@ -16,12 +16,19 @@ LV_FONT_DECLARE(font_zune_regular_13)
 #define ZD_FOCUS 180
 #define ZD_INSET 34
 
-static struct {
+/* zune45: one state per dial. Dials stack (Settings, then the output picker over it): the setters act on the newest
+ * dial still alive, and every event acts on its own dial - before, a second dial reset the one shared state, and the
+ * dial underneath (Settings) lost its layout and its loop: it stuck. */
+typedef struct zd {
     lv_obj_t *dial, *tick, *row[ZDIAL_ROWS], *lbl[ZDIAL_ROWS], *icon[ZDIAL_ROWS], *badge[ZDIAL_ROWS], *sub[ZDIAL_ROWS];
     int n, ln, copies, recentring, size[ZDIAL_ROWS], top, bottom;   /* n: rows built; ln: items (n = ln * copies) */
     void (*pick)(int);
     char action[ZDIAL_ROWS][40];
-} Z;
+    struct zd *prev;                                               /* the dial built before this one */
+} zd_t;
+static zd_t g_zd_none, *Zp = &g_zd_none;
+#define Z (*Zp)
+static zd_t *zd_of(lv_obj_t *dial){ zd_t *d = dial ? lv_obj_get_user_data(dial) : NULL; return d ? d : &g_zd_none; }
 
 
 /* scroll-time setters that do nothing when the value is already set: every LVGL style write re-resolves the object's
@@ -68,9 +75,11 @@ static void layout(void){
         if(Z.sub[i] && s == 0) zg_align(Z.sub[i], x + 3, 23);
     }
 }
-static void scroll_cb(lv_event_t *e){ (void)e; layout(); }
-static void scroll_end_cb(lv_event_t *e){                 /* a looping dial settled in an outer copy: hop to the middle one */
-    (void)e; if(!Z.dial || Z.copies < 3 || Z.recentring) return;
+static void scroll_cb(lv_event_t *e){ zd_t *sv = Zp; Zp = zd_of(lv_event_get_current_target(e)); layout(); Zp = sv; }
+static void scroll_end_inst(void);
+static void scroll_end_cb(lv_event_t *e){ zd_t *sv = Zp; Zp = zd_of(lv_event_get_current_target(e)); scroll_end_inst(); Zp = sv; }
+static void scroll_end_inst(void){                        /* a looping dial settled in an outer copy: hop to the middle one */
+    if(!Z.dial || Z.copies < 3 || Z.recentring) return;
     int y = lv_obj_get_scroll_y(Z.dial), f = (y + ZD_PITCH / 2) / ZD_PITCH;
     if(f >= Z.ln && f < 2 * Z.ln) return;
     Z.recentring = 1;
@@ -80,16 +89,28 @@ static void scroll_end_cb(lv_event_t *e){                 /* a looping dial sett
 }
 static int g_wrap_next;
 void zdial_wrap_next(void){ g_wrap_next = 1; }
-static void del_cb(lv_event_t *e){ if(lv_event_get_target(e) == Z.dial){ Z.dial = NULL; Z.n = 0; } }
-static void item_cb(lv_event_t *e){ int i = (int)(intptr_t)lv_event_get_user_data(e); if(Z.pick && i >= 0 && i < Z.ln) Z.pick(i); }
+static void del_cb(lv_event_t *e){
+    lv_obj_t *t = lv_event_get_target(e); zd_t *d = lv_obj_get_user_data(t);
+    if(!d || d->dial != t) return;
+    if(Zp == d) Zp = d->prev ? d->prev : &g_zd_none;            /* the dial underneath is current again */
+    else for(zd_t *q = Zp; q && q != &g_zd_none; q = q->prev) if(q->prev == d){ q->prev = d->prev; break; }
+    lv_obj_set_user_data(t, NULL); free(d);
+}
+static void item_cb(lv_event_t *e){
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    lv_obj_t *row = lv_event_get_current_target(e); zd_t *d = zd_of(lv_obj_get_parent(row));
+    if(d->pick && i >= 0 && i < d->ln){ zd_t *sv = Zp; Zp = d; d->pick(i); if(Zp == d && sv != d) Zp = sv; }
+}
 
 void zdial_build(lv_obj_t *parent, const char *const *labels, int n, int focus, void (*pick)(int), int top, const char *action){
     if(n > ZDIAL_MAX) n = ZDIAL_MAX;
-    memset(&Z, 0, sizeof Z);
+    zd_t *nd = calloc(1, sizeof *nd); if(!nd) return;
+    nd->prev = Zp == &g_zd_none ? NULL : Zp; Zp = nd;
     Z.copies = (g_wrap_next && n >= 3) ? 3 : 1; g_wrap_next = 0;
     Z.ln = n; Z.n = n * Z.copies; Z.pick = pick; Z.top = top;
     Z.dial = lv_obj_create(parent);
     lv_obj_remove_style_all(Z.dial); kit_keep(Z.dial);
+    lv_obj_set_user_data(Z.dial, nd);
     lv_obj_set_size(Z.dial, 360, 360); lv_obj_set_pos(Z.dial, 0, 0);
     lv_obj_set_flex_flow(Z.dial, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_top(Z.dial, ZD_FOCUS - ZD_PITCH / 2, 0);
@@ -110,6 +131,7 @@ void zdial_build(lv_obj_t *parent, const char *const *labels, int n, int focus, 
         lv_obj_set_size(r, 360, ZD_PITCH);
         lv_obj_remove_flag(r, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(r, LV_OBJ_FLAG_SNAPPABLE);
+        lv_obj_set_style_translate_x(r, 6, LV_STATE_PRESSED);          /* zune46: a touched row gives a little (Metro's tilt), so a tap reads */
         if(c == mid){
             snprintf(Z.action[i], sizeof Z.action[i], "%s.%d", action ? action : "zdial", li);
             ui_on(r, item_cb, LV_EVENT_CLICKED, (void *)(intptr_t)li, Z.action[i], UI_CORE);
@@ -737,4 +759,64 @@ void zune_toast_action(const char *icon, const char *title, const char *sub, con
         lv_obj_add_event_cb(p, zat_btn_cb, LV_EVENT_CLICKED, NULL);
     } else lv_obj_remove_flag(p, LV_OBJ_FLAG_CLICKABLE);
     g_zat_t = lv_timer_create(zat_timeout, ms > 0 ? ms : 6000, NULL); lv_timer_set_repeat_count(g_zat_t, 1);
+}
+
+/* ---- sleep timer ring (zune41): an accent hairline round the rim, full when the timer is set, shrinking to nothing as
+ * it runs out; one 1 s timer serves every ring (Home, lock screen, Now Playing) ---- */
+int ui_sleep_state(int *secs_left); int ui_sleep_total_secs(void);
+#define ZSR_MAX 6
+static lv_obj_t *g_zsr[ZSR_MAX]; static int g_zsr_n; static lv_timer_t *g_zsr_tm;
+static void zsr_del_cb(lv_event_t *e){ lv_obj_t *o = lv_event_get_target(e); for(int i = 0; i < g_zsr_n; i++) if(g_zsr[i] == o){ g_zsr[i] = g_zsr[--g_zsr_n]; break; } }
+static void zsr_tick(lv_timer_t *t){
+    (void)t;
+    int left = 0, on = ui_sleep_state(&left) == 1, tot = ui_sleep_total_secs();
+    int deg = (on && tot > 0) ? (int)(360L * left / tot) : 0;
+    for(int i = 0; i < g_zsr_n; i++){
+        lv_obj_t *a = g_zsr[i];
+        if(!on || deg <= 0){ if(!lv_obj_has_flag(a, LV_OBJ_FLAG_HIDDEN)) lv_obj_add_flag(a, LV_OBJ_FLAG_HIDDEN); continue; }
+        if(lv_obj_has_flag(a, LV_OBJ_FLAG_HIDDEN)) lv_obj_remove_flag(a, LV_OBJ_FLAG_HIDDEN);
+        if(lv_arc_get_angle_end(a) != deg) lv_arc_set_angles(a, 0, deg);
+    }
+}
+lv_obj_t *zune_sleep_ring(lv_obj_t *parent, int d){
+    if(!parent || g_zsr_n >= ZSR_MAX) return NULL;
+    lv_obj_t *a = lv_arc_create(parent); kit_keep(a);
+    lv_obj_remove_style_all(a);
+    lv_obj_set_size(a, d, d); lv_obj_center(a);
+    lv_arc_set_rotation(a, 270); lv_arc_set_bg_angles(a, 0, 0); lv_arc_set_angles(a, 0, 360);
+    lv_obj_set_style_arc_width(a, 2, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(a, TC(ACCENT_PRIMARY), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_opa(a, 170, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(a, true, LV_PART_INDICATOR);
+    lv_obj_remove_flag(a, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(a, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(a, zsr_del_cb, LV_EVENT_DELETE, NULL);
+    g_zsr[g_zsr_n++] = a;
+    if(!g_zsr_tm) g_zsr_tm = lv_timer_create(zsr_tick, 1000, NULL);
+    zsr_tick(NULL);
+    return a;
+}
+
+/* ---- top-layer modals (zune45) ---- */
+#define ZM_MAX 6
+static void zm_exec_y(void *o, int32_t v){ lv_obj_set_y((lv_obj_t *)o, v); }
+static struct { lv_obj_t *o; void (*close)(void); } g_zm[ZM_MAX]; static int g_zm_n;
+static void zm_del_cb(lv_event_t *e){ lv_obj_t *o = lv_event_get_target(e);
+    for(int i = 0; i < g_zm_n; i++) if(g_zm[i].o == o){ for(int k = i; k + 1 < g_zm_n; k++) g_zm[k] = g_zm[k + 1]; g_zm_n--; break; } }
+void zmodal_push(lv_obj_t *o, void (*close)(void)){
+    if(!o || g_zm_n >= ZM_MAX) return;
+    g_zm[g_zm_n].o = o; g_zm[g_zm_n].close = close; g_zm_n++;
+    lv_obj_add_event_cb(o, zm_del_cb, LV_EVENT_DELETE, NULL);
+    /* a transient overlay drops in a little from above (WP7 "swivel", as a cheap move rather than a 3D turn) */
+    lv_anim_t a; lv_anim_init(&a); lv_anim_set_var(&a, o); lv_anim_set_exec_cb(&a, zm_exec_y);
+    lv_anim_set_values(&a, -36, lv_obj_get_y(o)); lv_anim_set_duration(&a, 170); lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_obj_set_y(o, -36); lv_anim_start(&a);
+}
+int zmodal_active(void){ return g_zm_n > 0; }
+int zmodal_close_top(void){
+    if(!g_zm_n) return 0;
+    void (*c)(void) = g_zm[g_zm_n - 1].close; lv_obj_t *o = g_zm[g_zm_n - 1].o;
+    g_zm_n--;                                                     /* gone from the list now; the delete event finds nothing */
+    if(c) c(); else lv_obj_delete_async(o);
+    return 1;
 }
