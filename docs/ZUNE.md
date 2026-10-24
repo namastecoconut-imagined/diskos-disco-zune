@@ -12,16 +12,37 @@ there. You can switch between Zune and the other themes at any time.
 > to describe the visual style. It uses no Microsoft assets: the type is Open Sans (SIL OFL 1.1) and every
 > icon and layout is drawn from scratch.
 
+## What's new
+
+**Update 2 (October 2026):**
+- A typographic Now Playing, with an Immersive view (swipe up).
+- Quickplay, and a Metro lock screen with a desk clock while charging.
+- A light mode.
+- Rim scrolling in every list, and letter jump round the rim.
+- A rim keyboard with a space key.
+- A bigger-target equalizer.
+- A new boot splash and power-off screen.
+- A gesture guide.
+
+Last.fm, Boomshine, SongSphere and Album Roulette are removed. The full list is in [the changelog](zune/CHANGELOG.md).
+
 ## What you get
 
 | | |
 |---|---|
-| ![home](zune/screens/home.png) | **Home**: one big lowercase list (now playing, music, queue, search, equalizer, modes, bluetooth, wi-fi, weather, apps, settings). It loops endlessly and scrolls freely. |
-| ![now playing](zune/screens/now-playing.png) | **Now Playing**: the cover in the background with the seek ring on the rim, plus large title/artist text and the format line. Optionally takes its accent from the album art. |
-| ![settings](zune/screens/settings.png) | **Settings and lists**: one looping dial that scrolls with momentum. The rows follow the round screen. |
-| ![working mode](zune/screens/working-mode.png) | **Working mode**: six circles, including **usb-c audio** for USB-C headphones or a DAC, next to BT receiver, USB DAC, AirPlay and USB storage. |
-| ![wifi](zune/screens/wifi-connecting.png) | **Wi-Fi and Bluetooth**: scanning spins an accent arc on the rim. Connecting and failed are full-screen takeovers. |
-| ![lock](zune/screens/lock-music.png) | **Lock screen**: album art or clock only. Charging, library scan, search, EQ and accent picker are themed as well. |
+| ![home](zune/screens/home.png) | **Home**: one big lowercase list (now playing, music, quickplay, queue, search, equalizer, modes, bluetooth, wi-fi, weather, apps, settings). It loops endlessly and scrolls freely, with the playing album drifting behind it. |
+| ![now playing](zune/screens/now-playing.png) | **Now Playing**: the cover, large title and artist, the time and the format, with the seek ring on the rim. Swipe sideways to skip, and swipe up for Immersive. |
+| ![immersive](zune/screens/immersive.png) | **Immersive**: the full-screen cover with big controls and optional synced lyrics. |
+| ![quickplay](zune/screens/quickplay.png) | **Quickplay**: the albums played last and the albums added last. Tap a cover to open it, or hold to play. |
+| ![lock](zune/screens/lock-screen.png) | **Lock screen**: a big clock, the date, the weather and what's playing. One tap unlocks. |
+| ![desk clock](zune/screens/desk-clock.png) | **Desk clock**: while charging, the lock screen stays on as a dim clock. |
+| ![equalizer](zune/screens/equalizer.png) | **Equalizer**: big − / + buttons and band arrows, with no tiny handles to hit. |
+| ![keyboard](zune/screens/keyboard.png) | **Rim keyboard**: slide round the edge to pick letters, with a big preview of the current letter. |
+| ![letter jump](zune/screens/letter-wheel.png) | **Letter jump**: drag the letter badge in a long list and A–Z wraps the rim. |
+| ![output](zune/screens/output-picker.png) | **Output picker**: headphones, USB-C, SPDIF and more. Working mode has **usb-c audio** for USB-C headphones or a DAC. |
+| ![weather](zune/screens/weather.png) | **Weather**: today's temperatures round the rim, with the current hour highlighted. |
+| ![light](zune/screens/home-light.png) | **Light mode**: every screen in a light variant, switched by hand or by the time of day. |
+| ![boot](zune/screens/boot.png) | **Boot and power-off**: "disc" with your album covers filling in behind it, and the same screen in reverse when switching off. |
 
 Behaviour worth knowing:
 
@@ -32,6 +53,9 @@ Behaviour worth knowing:
   will not skip through songs with nothing plugged in.
 - At 2% battery a shutdown countdown appears after two readings in a row. Plugging in cancels it.
 - Locking blanks the screen fully: a black cover is drawn and the backlight is switched off.
+- The Disc starts with an empty queue. To load the last song at start-up, turn on Settings > Playback > **Resume Last Song**.
+- Drag a finger round the rim to scroll any list. A swipe in from the left edge goes back.
+- Settings > Help > **Gesture Guide** shows the gestures again.
 
 ## Install
 
@@ -127,7 +151,7 @@ Before you open a pull request, run `make -C ui check-theme` and the tests in [D
 - The power-key menu is not themed, because the player owns the long press.
 - Some deep screens (file browser, books, a few app interiors) use Zune fonts but keep the stock layout.
 - There is no install-progress screen. diskOS shows only the update dialog.
-- Not tested much yet: AirPlay, the EQ editor, the USB storage screen and sleep-timer edge cases. Reports are welcome.
+- Not tested much yet: AirPlay, the USB storage screen and sleep-timer edge cases. Reports are welcome.
 
 ## Licence and credits
 
